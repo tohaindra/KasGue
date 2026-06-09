@@ -171,8 +171,8 @@ function buildReportTables({ monthly, categories, entries, user }, year) {
     ["Dashboard", "", "", "", "", "", "", "Tahun", year, "", ""],
     ["", "", "", "", "", "", "", "Bulan", monthNames[currentMonth - 1], "", ""],
     [],
-    ["Total Income", "", "Total Realisasi", "", "Total Alokasi", "", "Saldo", "", "%", "", ""],
-    [currentMonthIncome, "", currentMonthExpense, "", totalAllocation, "", currentSaldo, "", currentMonthIncome ? currentMonthExpense / currentMonthIncome : 0, "", ""],
+    ["Total Income", "Total Realisasi", "Total Alokasi", "Saldo", "%", "", "", "", "", "", ""],
+    [currentMonthIncome, currentMonthExpense, totalAllocation, currentSaldo, currentMonthIncome ? currentMonthExpense / currentMonthIncome : 0, "", "", "", "", "", ""],
     [],
     ["Kategori", "Alokasi", "Realisasi", "Progres", "%", "", "", "", "", "", ""],
   ];
@@ -245,6 +245,7 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
   const green = { red: 0.38, green: 0.8, blue: 0.55 };
   const light = { red: 0.87, green: 0.96, blue: 0.91 };
   const pale = { red: 0.73, green: 0.94, blue: 0.82 };
+  const white = { red: 1, green: 1, blue: 1 };
   const requests = [];
 
   for (const chart of dashboardMeta?.charts || []) {
@@ -261,7 +262,13 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
     );
 
     if (title === "Dashboard") {
-      requests.push(...columnWidthRequests(sheetId, [172, 172, 172, 172, 172, 172, 172, 78, 94, 78, 20, 100, 100, 100]));
+      requests.push(
+        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1000, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { backgroundColor: white, horizontalAlignment: "LEFT", textFormat: { bold: false, fontSize: 10, foregroundColor: { red: 0, green: 0, blue: 0 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        ...columnWidthRequests(sheetId, [150, 150, 150, 150, 118, 28, 28, 76, 76, 20, 20, 20, 20, 20]),
+        { updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 2, endIndex: 3 }, properties: { pixelSize: 38 }, fields: "pixelSize" } },
+        { updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 5, endIndex: 7 }, properties: { pixelSize: 28 }, fields: "pixelSize" } },
+        { updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 8, endIndex: 20 }, properties: { pixelSize: 24 }, fields: "pixelSize" } },
+      );
     } else if (title === "Income" || title === "Usage") {
       requests.push(...columnWidthRequests(sheetId, [170, 28, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108]));
     } else {
@@ -274,19 +281,9 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
     const headerRow = title === "Expenses" ? 0 : 2;
     if (title === "Dashboard") {
       requests.push(
-        { mergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 11 }, mergeType: "MERGE_ALL" } },
+        { mergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 9 }, mergeType: "MERGE_ALL" } },
         { mergeCells: { range: { sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 7 }, mergeType: "MERGE_ALL" } },
         { mergeCells: { range: { sheetId, startRowIndex: 3, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: 7 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 0, endColumnIndex: 2 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 2 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 2, endColumnIndex: 4 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 2, endColumnIndex: 4 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 4, endColumnIndex: 6 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 4, endColumnIndex: 6 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 6, endColumnIndex: 8 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 6, endColumnIndex: 8 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 8, endColumnIndex: 10 }, mergeType: "MERGE_ALL" } },
-        { mergeCells: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 8, endColumnIndex: 10 }, mergeType: "MERGE_ALL" } },
       );
     } else if (title !== "Expenses") {
       requests.push(
@@ -294,27 +291,29 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
         { mergeCells: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 14 }, mergeType: "MERGE_ALL" } },
       );
     }
-    requests.push(
-      { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 14, foregroundColor: { red: 1, green: 1, blue: 1 } }, backgroundColor: dark } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } },
-      { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { horizontalAlignment: "CENTER" } }, fields: "userEnteredFormat.horizontalAlignment" } },
-      { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { backgroundColor: light, textFormat: { foregroundColor: { red: 0.28, green: 0.33, blue: 0.41 } } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } },
-      { repeatCell: { range: { sheetId, startRowIndex: headerRow, endRowIndex: headerRow + 1, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } }, backgroundColor: dark, horizontalAlignment: "CENTER" } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
-    );
+    if (title !== "Dashboard") {
+      requests.push(
+        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 14, foregroundColor: { red: 1, green: 1, blue: 1 } }, backgroundColor: dark } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { horizontalAlignment: "CENTER" } }, fields: "userEnteredFormat.horizontalAlignment" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { backgroundColor: light, textFormat: { foregroundColor: { red: 0.28, green: 0.33, blue: 0.41 } } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: headerRow, endRowIndex: headerRow + 1, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } }, backgroundColor: dark, horizontalAlignment: "CENTER" } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+      );
+    }
     if (title === "Dashboard") {
       requests.push(
-        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 11 }, cell: { userEnteredFormat: { backgroundColor: green, horizontalAlignment: "LEFT", textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 2, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: 11 }, cell: { userEnteredFormat: { backgroundColor: green } }, fields: "userEnteredFormat.backgroundColor" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 9 }, cell: { userEnteredFormat: { backgroundColor: green, horizontalAlignment: "LEFT", textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 2, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: 9 }, cell: { userEnteredFormat: { backgroundColor: green } }, fields: "userEnteredFormat.backgroundColor" } },
         { repeatCell: { range: { sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 7 }, cell: { userEnteredFormat: { horizontalAlignment: "CENTER", textFormat: { bold: true, fontSize: 16, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(horizontalAlignment,textFormat)" } },
         { repeatCell: { range: { sheetId, startRowIndex: 2, endRowIndex: 4, startColumnIndex: 7, endColumnIndex: 10 }, cell: { userEnteredFormat: { textFormat: { bold: true, foregroundColor: { red: 0.1, green: 0.28, blue: 0.25 } } } }, fields: "userEnteredFormat.textFormat" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 0, endColumnIndex: 10 }, cell: { userEnteredFormat: { backgroundColor: green, horizontalAlignment: "CENTER", textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 10 }, cell: { userEnteredFormat: { backgroundColor: pale, horizontalAlignment: "CENTER", textFormat: { bold: true, fontSize: 12, foregroundColor: { red: 0.1, green: 0.25, blue: 0.25 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: green, horizontalAlignment: "CENTER", textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: pale, horizontalAlignment: "CENTER", textFormat: { bold: true, fontSize: 12, foregroundColor: { red: 0.1, green: 0.25, blue: 0.25 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
         { repeatCell: { range: { sheetId, startRowIndex: 8, endRowIndex: 9, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: green, horizontalAlignment: "CENTER", textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { horizontalAlignment: "RIGHT" } }, fields: "userEnteredFormat.horizontalAlignment" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 0, endColumnIndex: 1 }, cell: { userEnteredFormat: { horizontalAlignment: "LEFT" } }, fields: "userEnteredFormat.horizontalAlignment" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 3, endColumnIndex: 4 }, cell: { userEnteredFormat: { horizontalAlignment: "LEFT", textFormat: { foregroundColor: { red: 1, green: 0.6, blue: 0 } } } }, fields: "userEnteredFormat(horizontalAlignment,textFormat.foregroundColor)" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: light } }, fields: "userEnteredFormat.backgroundColor" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 8 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0.00" } } }, fields: "userEnteredFormat.numberFormat" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 8, endColumnIndex: 10 }, cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 4 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0.00" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 4, endColumnIndex: 5 }, cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 1, endColumnIndex: 3 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0.00" } } }, fields: "userEnteredFormat.numberFormat" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 20, startColumnIndex: 4, endColumnIndex: 5 }, cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } },
         { addConditionalFormatRule: { rule: { ranges: [{ sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 2, endColumnIndex: 3 }], booleanRule: { condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: "=C10>B10" }] }, format: { backgroundColor: { red: 1, green: 0.08, blue: 0.06 }, textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } } }, index: 0 } },
@@ -411,6 +410,23 @@ export async function generateGoogleSheetsFinanceReport(db, userId, year = new D
   const sheetMap = await ensureReportSheets(sheets, spreadsheetId);
   const data = await fetchReportData(db, userId, year);
   const tables = buildReportTables(data, year);
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: reportSheets.map((title) => ({
+        unmergeCells: {
+          range: {
+            sheetId: sheetMap.get(title),
+            startRowIndex: 0,
+            endRowIndex: 1000,
+            startColumnIndex: 0,
+            endColumnIndex: 14,
+          },
+        },
+      })),
+    },
+  });
 
   for (const title of reportSheets) {
     await sheets.spreadsheets.values.clear({ spreadsheetId, range: `${title}!A1:Z1000` });
