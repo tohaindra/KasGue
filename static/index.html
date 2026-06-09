@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Email Telegram AI Forwarder Node</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>Email Telegram AI Forwarder</h1>
+          <p>Node.js + MySQL untuk memilah email penting dan mengirimnya ke Telegram Bot.</p>
+        </div>
+        <div class="status-pill" id="schedulerStatus">Scheduler: mati</div>
+      </section>
+
+      <section class="panel config">
+        <h2>Konfigurasi dari .env</h2>
+        <div id="configGrid" class="config-grid"></div>
+      </section>
+
+      <section class="layout">
+        <section class="panel action-panel">
+          <div class="panel-title">
+            <h2>Kontrol</h2>
+          </div>
+          <div class="actions">
+            <button id="testTelegram" type="button">Test Telegram</button>
+            <button id="scanPreview" type="button">Scan Preview</button>
+            <button id="scanSend" type="button" class="primary">Scan & Kirim</button>
+            <button id="startScheduler" type="button">Start Scheduler</button>
+            <button id="stopScheduler" type="button">Stop Scheduler</button>
+          </div>
+          <pre id="logBox" class="log">Siap.</pre>
+        </section>
+
+        <section class="panel results-panel">
+          <div class="panel-title">
+            <h2>Email Diproses</h2>
+            <strong id="resultCount">0</strong>
+          </div>
+          <div id="results" class="results"></div>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
