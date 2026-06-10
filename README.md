@@ -191,12 +191,14 @@ Dengan cara ini, Telegram tetap jadi sumber onboarding, tapi mobile app punya me
 
 ## Laporan Google Sheets
 
-Laporan Google Sheets dibuat dalam **1 tab saja** bernama `Laporan Keuangan`. Aplikasi akan menghapus tab lain di spreadsheet target, lalu mengisi:
+Laporan Google Sheets dibuat dalam beberapa tab:
 
-- KPI pemasukan, pengeluaran, saldo, rasio tabungan
-- rekap bulanan 12 bulan
-- kategori bulan ini
-- detail transaksi terbaru
+- `Dashboard`
+- `Income`
+- `Usage`
+- `Expenses`
+
+Aplikasi akan menjaga tab laporan tersebut dan menghapus tab lain di spreadsheet target.
 
 Setup yang disarankan:
 
@@ -219,6 +221,90 @@ Generate laporan dari bot:
 ```text
 /laporan_sheet
 ```
+
+## Deploy ke VPS dengan Docker
+
+Contoh ini mengasumsikan MySQL sudah berjalan di VPS host, bukan di container.
+
+1. Clone repo dan masuk folder project:
+
+```bash
+git clone https://github.com/tohaindra/KasGue.git
+cd KasGue
+```
+
+2. Buat file `.env` dari contoh:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+3. Untuk Docker, isi minimal variabel berikut:
+
+```text
+HOST=0.0.0.0
+PORT=8765
+
+MYSQL_HOST=host.docker.internal
+MYSQL_PORT=3306
+MYSQL_USER=kasgue
+MYSQL_PASSWORD=password_mysql_anda
+MYSQL_DATABASE=email_forwarder
+
+EMAIL_FORWARDER_ENABLED=false
+
+FINANCE_TELEGRAM_BOT_TOKEN=token_bot_finance
+FINANCE_ADMIN_CHAT_IDS=chat_id_admin
+
+USE_OPENAI=true
+OPENAI_API_KEY=isi_api_key_openai
+FINANCE_OPENAI_MODEL=gpt-4.1-nano
+RECEIPT_OCR_MODEL=gpt-4.1-mini
+
+GOOGLE_SHEETS_ENABLED=true
+GOOGLE_SERVICE_ACCOUNT_KEY_FILE=/run/secrets/google-service-account.json
+GOOGLE_SHEET_ID=id_atau_url_google_sheet
+```
+
+4. Simpan JSON service account Google di root project VPS dengan nama:
+
+```bash
+google-service-account.json
+```
+
+File ini tidak perlu masuk Git.
+
+5. Pastikan user MySQL bisa diakses dari container. Jika MySQL di host VPS:
+
+```sql
+CREATE DATABASE IF NOT EXISTS email_forwarder;
+CREATE USER IF NOT EXISTS 'kasgue'@'%' IDENTIFIED BY 'password_mysql_anda';
+GRANT ALL PRIVILEGES ON email_forwarder.* TO 'kasgue'@'%';
+FLUSH PRIVILEGES;
+```
+
+Pastikan MySQL bind ke `0.0.0.0` atau minimal bisa diakses dari bridge Docker.
+
+6. Build dan jalankan:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+7. Cek log:
+
+```bash
+docker compose -f docker-compose.prod.yml logs -f kasgue
+```
+
+8. Cek container:
+
+```bash
+docker ps
+```
+
+Dashboard HTTP hanya dipublish ke `127.0.0.1:8765` di VPS. Jika ingin akses dari internet, pasang Nginx reverse proxy dan HTTPS, jangan langsung expose port aplikasi tanpa proteksi.
 
 ## Bot Email Forwarder
 

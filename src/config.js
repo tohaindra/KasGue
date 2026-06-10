@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 const defaults = {
+  HOST: "127.0.0.1",
   PORT: "8765",
   EMAIL_PROVIDER: "gmail",
   IMAP_HOST: "imap.gmail.com",

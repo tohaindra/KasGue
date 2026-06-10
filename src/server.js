@@ -6,8 +6,8 @@ import { pollTelegramBot } from "./telegram.js";
 
 const server = createAppServer();
 
-server.listen(Number(env("PORT")), "127.0.0.1", () => {
-  console.log(`Email Telegram AI Forwarder Node running at http://127.0.0.1:${env("PORT")}`);
+server.listen(Number(env("PORT")), env("HOST"), () => {
+  console.log(`Email Telegram AI Forwarder Node running at http://${env("HOST")}:${env("PORT")}`);
   const config = getConfig();
 
   if (

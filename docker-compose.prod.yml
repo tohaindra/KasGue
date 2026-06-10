@@ -1,0 +1,15 @@
+services:
+  kasgue:
+    build: .
+    container_name: kasgue
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8765:8765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./google-service-account.json:/run/secrets/google-service-account.json:ro
