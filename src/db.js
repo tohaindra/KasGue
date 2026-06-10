@@ -156,6 +156,29 @@ export async function ensureSchema(db) {
     )
   `);
   await db.query(`
+    CREATE TABLE IF NOT EXISTS finance_savings (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      account_name VARCHAR(255) NOT NULL,
+      amount DECIMAL(15,2) NOT NULL,
+      currency CHAR(3) NOT NULL DEFAULT 'IDR',
+      description TEXT NULL,
+      raw_text TEXT NULL,
+      source ENUM('telegram', 'mobile', 'web', 'import') NOT NULL DEFAULT 'telegram',
+      source_message_id BIGINT NULL,
+      source_chat_id BIGINT NULL,
+      observed_at DATETIME NOT NULL,
+      sync_version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+      deleted_at TIMESTAMP NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_finance_savings_user_observed (user_id, observed_at),
+      INDEX idx_finance_savings_user_sync (user_id, sync_version, updated_at),
+      UNIQUE KEY unique_finance_saving_source (user_id, source, source_message_id)
+    )
+  `);
+  await db.query(`
     CREATE TABLE IF NOT EXISTS finance_sync_tokens (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       user_id BIGINT UNSIGNED NOT NULL,

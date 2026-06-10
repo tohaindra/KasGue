@@ -27,18 +27,19 @@ const financeCategories = {
 
 const incomeWords = new Set(["gaji", "pemasukan", "income", "masuk", "bonus", "fee"]);
 const expenseWords = new Set(["beli", "bayar", "pengeluaran", "keluar", "jajan", "belanja"]);
+const savingWords = new Set(["tabungan", "saldo", "simpanan", "deposito"]);
 const foodHints = new Set(["apel", "ayam", "bakso", "buah", "kopi", "makan", "makanan", "minum", "minuman", "nanas", "nasi", "roti", "sayur", "snack"]);
 
 function extractAmount(text) {
   const match = String(text || "").match(
-    /(?:rp\.?\s*)?(\d+(?:[.,]\d{3})*|\d+)(?:\s*(ribu|rb|k|juta|jt|m))?/i,
+    /(?:rp\.?\s*)?(\d+(?:[.,]\d{3})*|\d+)(?:\s*(ribuan|ribu|rb|k|jutaan|juta|jt|m))?/i,
   );
   if (!match) return null;
   const suffix = String(match[2] || "").toLowerCase();
   const multiplier =
-    suffix === "juta" || suffix === "jt" || suffix === "m"
+    suffix === "jutaan" || suffix === "juta" || suffix === "jt" || suffix === "m"
       ? 1000000
-      : suffix === "ribu" || suffix === "rb" || suffix === "k"
+      : suffix === "ribuan" || suffix === "ribu" || suffix === "rb" || suffix === "k"
         ? 1000
         : 1;
   return { amount: Number(match[1].replace(/[.,]/g, "")) * multiplier, raw: match[0] };
@@ -68,15 +69,65 @@ function parseFinanceTransaction(text) {
       original
         .replace(new RegExp(`\\b${categoryKey}\\b`, "i"), "")
         .replace(amountInfo.raw, "")
-        .replace(/\b(saya|aku|gue|beli|bayar|pengeluaran|catat)\b/gi, "")
+        .replace(/\b(saya|aku|gue|ada|punya|dapat|terima|beli|bayar|pengeluaran|catat)\b/gi, "")
         .replace(/\s+/g, " ")
         .trim() || "Tanpa deskripsi",
     amount: amountInfo.amount,
   };
 }
 
+function parseSavingSnapshot(text) {
+  const original = String(text || "").trim();
+  const lower = original.toLowerCase();
+  const amountInfo = extractAmount(original);
+  if (!amountInfo?.amount) return null;
+
+  const words = lower.split(/\s+/).map((word) => word.replace(/[^a-z]/g, ""));
+  if (!words.some((word) => savingWords.has(word))) return null;
+
+  const accountMatch = original.match(/\b(?:di|ke|rekening|akun)\s+(.+?)(?:\s+(?:sebesar|senilai|jumlahnya)\b|$)/i);
+  const description = original
+    .replace(amountInfo.raw, "")
+    .replace(/\b(saya|aku|gue|punya|ada|catat|tabungan|saldo|simpanan|deposito)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return {
+    accountName: accountMatch?.[1]?.trim() || description || "Tabungan",
+    amount: amountInfo.amount,
+    description: description || "Saldo tabungan",
+  };
+}
+
 function formatCurrency(amount) {
   return `Rp ${Number(amount || 0).toLocaleString("id-ID")}`;
+}
+
+function formatTelegramDateTime(unixSeconds) {
+  const date = unixSeconds ? new Date(Number(unixSeconds) * 1000) : new Date();
+  const parts = new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.day}/${value.month}/${value.year} ${value.hour}:${value.minute}`;
+}
+
+function buildRecordedMessage({ title, category, type, amount, note, message }) {
+  return [
+    `${title} tercatat.`,
+    "",
+    `⏰ Waktu : ${formatTelegramDateTime(message?.date)}`,
+    `🗂 Kategori : ${category}`,
+    `🧾 Tipe : ${type}`,
+    `💰 Jumlah : ${formatCurrency(amount)}`,
+    `📋 Catatan: ${note || "Tanpa deskripsi"}`,
+  ].join("\n");
 }
 
 function slugify(value) {
@@ -171,6 +222,44 @@ async function saveFinanceTransaction(db, tx, message) {
       Number(chat.id || 0),
     ],
   );
+}
+
+async function saveSavingSnapshot(db, saving, message) {
+  const chat = message.chat || {};
+  const financeUser = await upsertFinanceUser(db, message);
+  await db.query(
+    `
+      INSERT INTO finance_savings
+        (user_id, account_name, amount, currency, description, raw_text, source, source_message_id, source_chat_id, observed_at)
+      VALUES (?, ?, ?, 'IDR', ?, ?, 'telegram', ?, ?, NOW())
+    `,
+    [
+      financeUser.id,
+      saving.accountName,
+      saving.amount,
+      saving.description,
+      message.text || null,
+      Number(message.message_id || 0),
+      Number(chat.id || 0),
+    ],
+  );
+}
+
+async function getSavingSummary(db, telegramUserId) {
+  const userId = await getFinanceUserId(db, telegramUserId);
+  if (!userId) return [];
+  const [rows] = await db.query(
+    `
+      SELECT account_name, amount, description, observed_at
+      FROM finance_savings
+      WHERE user_id = ?
+        AND deleted_at IS NULL
+      ORDER BY observed_at DESC, id DESC
+      LIMIT 20
+    `,
+    [userId],
+  );
+  return rows;
 }
 
 function pickLargestPhoto(photos = []) {
@@ -541,6 +630,18 @@ function buildFinanceReport(rows, title = "Laporan keuangan bulan ini") {
   return lines.join("\n");
 }
 
+function buildSavingReport(rows) {
+  if (!rows.length) return "Belum ada data tabungan.";
+  const total = rows.reduce((sum, row) => sum + Number(row.amount), 0);
+  const lines = ["Ringkasan tabungan", ""];
+  for (const row of rows) {
+    lines.push(`- ${row.account_name}: ${formatCurrency(row.amount)}`);
+  }
+  lines.push("");
+  lines.push(`Total tabungan tercatat: ${formatCurrency(total)}`);
+  return lines.join("\n");
+}
+
 function hashToken(token) {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -624,7 +725,7 @@ async function handleFinanceRegistration(db, config, chatId, text, financeUser) 
   if (command === "/start" || command === "/register") {
     step = "full_name";
     await setRegistrationStep(db, financeUser.id, step);
-    return sendTelegramChat(config.financeTelegramBotToken, chatId, "Selamat datang. Untuk memakai bot Catat Duitku, registrasi dulu.\n\nKetik nama lengkap Anda:");
+    return sendTelegramChat(config.financeTelegramBotToken, chatId, "Selamat datang. Untuk memakai bot KasGue, registrasi dulu.\n\nKetik nama lengkap Anda:");
   }
   if (!step) {
     await setRegistrationStep(db, financeUser.id, "full_name");
@@ -717,17 +818,19 @@ export async function handleFinanceTelegramMessage(message) {
         config.financeTelegramBotToken,
         chatId,
         [
-          "Halo. Saya bot Catat Duitku.",
+          "Halo. Saya bot KasGue.",
           "",
           "Format transaksi:",
           "- makanan 50000 makan siang",
           "- gaji 5000000 gaji bulanan",
           "- pemasukan 250000 freelance",
+          "- tabungan 7000000 di blu BCA",
           "- kirim foto struk Alfamart/Indomaret untuk OCR otomatis",
           "",
           "Command:",
           "/laporan - laporan bulan ini",
           "/laporan_sheet - generate laporan Google Sheets",
+          "/tabungan - lihat tabungan/aset tercatat",
           "/rekap - rekap bulan ini",
           "/rekap minggu - rekap minggu ini",
           "/rekap 2026-06 - rekap bulan tertentu",
@@ -754,6 +857,10 @@ export async function handleFinanceTelegramMessage(message) {
         `Laporan Google Sheets berhasil diupdate.\n${result.url}`,
       );
     }
+    if (command === "/tabungan") {
+      const rows = await getSavingSummary(db, Number(message.from?.id || 0));
+      return sendTelegramChat(config.financeTelegramBotToken, chatId, buildSavingReport(rows));
+    }
     if (command === "/rekap") {
       const options = parseRekapOptions(text);
       const rows = await getFinanceSummary(db, Number(message.from?.id || 0), options);
@@ -772,11 +879,39 @@ export async function handleFinanceTelegramMessage(message) {
       return sendTelegramChat(config.financeTelegramBotToken, chatId, "Tips keuangan pribadi:\n1. Catat semua pemasukan dan pengeluaran.\n2. Pisahkan kebutuhan dan keinginan.\n3. Pakai metode 50-30-20.\n4. Review laporan tiap bulan.\n5. Siapkan dana darurat sebelum belanja besar.");
     }
 
+    const saving = parseSavingSnapshot(text);
+    if (saving) {
+      await saveSavingSnapshot(db, saving, message);
+      return sendTelegramChat(
+        config.financeTelegramBotToken,
+        chatId,
+        buildRecordedMessage({
+          title: "Tabungan",
+          category: saving.accountName,
+          type: "Tabungan",
+          amount: saving.amount,
+          note: saving.description,
+          message,
+        }),
+      );
+    }
+
     const tx = parseFinanceTransaction(text);
     if (tx) {
       await saveFinanceTransaction(db, tx, message);
       const label = tx.transactionType === "income" ? "Pemasukan" : "Pengeluaran";
-      return sendTelegramChat(config.financeTelegramBotToken, chatId, `${label} tercatat.\n${tx.category}\n${formatCurrency(tx.amount)}\nCatatan: ${tx.description}`);
+      return sendTelegramChat(
+        config.financeTelegramBotToken,
+        chatId,
+        buildRecordedMessage({
+          title: label,
+          category: tx.category,
+          type: label,
+          amount: tx.amount,
+          note: tx.description,
+          message,
+        }),
+      );
     }
 
     const answer = await askFinanceAI(
