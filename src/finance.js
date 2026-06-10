@@ -130,6 +130,14 @@ function buildRecordedMessage({ title, category, type, amount, note, message }) 
   ].join("\n");
 }
 
+function compactLocation(value) {
+  return String(value || "")
+    .split(",")[0]
+    .replace(/\b(RT|RW)\.?\s*\d+\/?\d*\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function slugify(value) {
   return (
     String(value || "")
@@ -482,20 +490,23 @@ async function handleReceiptPhoto(db, config, message) {
   const imageBuffer = await downloadTelegramFile(config.financeTelegramBotToken, file.file_path);
   const receipt = await ocrReceiptImage(imageBuffer, ownerHints, "image/jpeg");
   const saved = await saveReceiptFromOcr(db, receipt, message, photo.file_id);
-  const itemCount = Array.isArray(receipt.items) ? receipt.items.length : 0;
   const label = saved.transactionType === "income" ? "Pemasukan" : "Pengeluaran";
+  const merchantNote =
+    receipt.merchant_name || receipt.bank_name
+      ? `${receipt.merchant_name || receipt.bank_name}${compactLocation(receipt.merchant_branch) ? ` - ${compactLocation(receipt.merchant_branch)}` : ""}`
+      : "Dari gambar";
+  const userCaption = String(message.caption || "").trim();
   return sendTelegramChat(
     config.financeTelegramBotToken,
     message.chat.id,
-    [
-      `${label} dari gambar berhasil dicatat.`,
-      `${receipt.merchant_name || "Merchant"}${receipt.merchant_branch ? ` - ${receipt.merchant_branch}` : ""}`,
-      `Kategori: ${saved.categoryName}`,
-      `Total: ${formatCurrency(saved.totalAmount)}`,
-      `Item terbaca: ${itemCount}`,
-      `Tipe dokumen: ${saved.documentType}`,
-      `Receipt ID: ${saved.receiptId}`,
-    ].join("\n"),
+    buildRecordedMessage({
+      title: label,
+      category: saved.categoryName,
+      type: label,
+      amount: saved.totalAmount,
+      note: userCaption || merchantNote,
+      message,
+    }),
   );
 }
 
