@@ -83,7 +83,7 @@ async function fetchReportData(db, userId, year) {
       SELECT MONTH(occurred_at) AS month_no,
              transaction_type,
              SUM(amount) AS total
-      FROM finance_entries
+      FROM transactions
       WHERE user_id = ?
         AND deleted_at IS NULL
         AND YEAR(occurred_at) = ?
@@ -98,7 +98,7 @@ async function fetchReportData(db, userId, year) {
              COALESCE(c.name, 'Lainnya') AS category,
              SUM(e.amount) AS total,
              COUNT(*) AS count
-      FROM finance_entries e
+      FROM transactions e
       LEFT JOIN finance_categories c ON c.id = e.category_id
       WHERE e.user_id = ?
         AND e.deleted_at IS NULL
@@ -117,7 +117,7 @@ async function fetchReportData(db, userId, year) {
              e.description,
              e.amount,
              e.source
-      FROM finance_entries e
+      FROM transactions e
       LEFT JOIN finance_categories c ON c.id = e.category_id
       WHERE e.user_id = ?
         AND e.deleted_at IS NULL

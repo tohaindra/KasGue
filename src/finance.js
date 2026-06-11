@@ -1,8 +1,14 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getConfig } from "./config.js";
 import { ensureSchema, getDb } from "./db.js";
 import { generateGoogleSheetsFinanceReport } from "./googleSheetsReport.js";
-import { downloadTelegramFile, getTelegramFile, sendTelegramChat } from "./telegram.js";
+import {
+  answerTelegramCallback,
+  clearTelegramInlineKeyboard,
+  downloadTelegramFile,
+  getTelegramFile,
+  sendTelegramChat,
+} from "./telegram.js";
 
 const financeCategories = {
   makanan: "Makanan & Minuman",
@@ -18,7 +24,6 @@ const financeCategories = {
   hiburan: "Entertainment",
   belanja: "Belanja & Hadiah",
   kesehatan: "Kesehatan",
-  tabungan: "Tabungan",
   gaji: "Gaji",
   pemasukan: "Pemasukan",
   income: "Pemasukan",
@@ -29,6 +34,8 @@ const incomeWords = new Set(["gaji", "pemasukan", "income", "masuk", "bonus", "f
 const expenseWords = new Set(["beli", "bayar", "pengeluaran", "keluar", "jajan", "belanja"]);
 const savingWords = new Set(["tabungan", "saldo", "simpanan", "deposito"]);
 const foodHints = new Set(["apel", "ayam", "bakso", "buah", "kopi", "makan", "makanan", "minum", "minuman", "nanas", "nasi", "roti", "sayur", "snack"]);
+const healthHints = ["rumah sakit", "dokter", "klinik", "obat", "apotek", "kesehatan"];
+const billHints = ["kartu kredit", "tagihan", "cicilan", "angsuran"];
 
 function extractAmount(text) {
   const match = String(text || "").match(
@@ -52,6 +59,11 @@ function parseFinanceTransaction(text) {
   let categoryKey = null;
   let hasExpenseSignal = false;
 
+  if (healthHints.some((hint) => original.toLowerCase().includes(hint))) {
+    categoryKey = "kesehatan";
+  }
+  const isBillExpense = billHints.some((hint) => original.toLowerCase().includes(hint));
+
   for (const word of words) {
     const normalized = word.replace(/[^a-z]/g, "");
     if (!categoryKey && financeCategories[normalized]) categoryKey = normalized;
@@ -64,11 +76,12 @@ function parseFinanceTransaction(text) {
 
   return {
     transactionType: incomeWords.has(categoryKey) ? "income" : "expense",
-    category: financeCategories[categoryKey],
+    category: isBillExpense ? "Tagihan & Cicilan" : financeCategories[categoryKey],
     description:
       original
         .replace(new RegExp(`\\b${categoryKey}\\b`, "i"), "")
         .replace(amountInfo.raw, "")
+        .replace(/\b(?:dari|pakai|gunakan)\s+(?:target\s+)?(?:tabungan|simpanan)(?:\s+[^,.]+)?$/i, "")
         .replace(/\b(saya|aku|gue|ada|punya|dapat|terima|beli|bayar|pengeluaran|catat)\b/gi, "")
         .replace(/\s+/g, " ")
         .trim() || "Tanpa deskripsi",
@@ -84,6 +97,7 @@ function parseSavingSnapshot(text) {
 
   const words = lower.split(/\s+/).map((word) => word.replace(/[^a-z]/g, ""));
   if (!words.some((word) => savingWords.has(word))) return null;
+  if (words.some((word) => expenseWords.has(word))) return null;
 
   const accountMatch = original.match(/\b(?:di|ke|rekening|akun)\s+(.+?)(?:\s+(?:sebesar|senilai|jumlahnya)\b|$)/i);
   const description = original
@@ -97,6 +111,41 @@ function parseSavingSnapshot(text) {
     amount: amountInfo.amount,
     description: description || "Saldo tabungan",
   };
+}
+
+function parseSavingGoalCreation(text) {
+  const original = String(text || "").trim();
+  if (!/^buat\s+target\s+tabungan\b/i.test(original)) return null;
+  const amountInfo = extractAmount(original);
+  if (!amountInfo?.amount) return null;
+  const amountIndex = original.toLowerCase().indexOf(amountInfo.raw.toLowerCase());
+  const name = original
+    .slice(0, amountIndex)
+    .replace(/^buat\s+target\s+tabungan\s+/i, "")
+    .replace(/\s+sebesar\s*$/i, "")
+    .trim();
+  const accountName = original
+    .slice(amountIndex + amountInfo.raw.length)
+    .match(/\bdi\s+(.+?)(?:\s*[,;]\s*|\s+saldo\s+(?:awal|sekarang)\b|$)/i)?.[1]
+    ?.trim();
+  if (!name || !accountName) return null;
+  const initialMatch = original.match(/\bsaldo\s+(?:awal|sekarang)\s+(?:sudah\s+)?(?:rp\.?\s*)?(\d+(?:[.,]\d{3})*|\d+)(?:\s*(ribu|rb|k|juta|jt|m))?/i);
+  const initialInfo = initialMatch ? extractAmount(initialMatch[0].replace(/^.*?(?=\d)/, "")) : null;
+  return {
+    name,
+    targetAmount: amountInfo.amount,
+    accountName,
+    initialAmount: initialInfo?.amount || 0,
+  };
+}
+
+function parseSavingGoalDeposit(text) {
+  const original = String(text || "").trim();
+  if (!/^tabung\b/i.test(original)) return null;
+  const amountInfo = extractAmount(original);
+  const goalName = original.match(/\bke\s+(.+)$/i)?.[1]?.trim();
+  if (!amountInfo?.amount || !goalName) return null;
+  return { goalName, amount: amountInfo.amount };
 }
 
 function formatCurrency(amount) {
@@ -138,6 +187,172 @@ function compactLocation(value) {
     .trim();
 }
 
+function buildSavingGoalRecordedMessage({ category, amount, note, message, goal, remaining }) {
+  return [
+    "Pengeluaran tercatat.",
+    "",
+    `⏰ Waktu : ${formatTelegramDateTime(message?.date)}`,
+    `🗂 Kategori : ${category}`,
+    "🧾 Tipe : Pengeluaran",
+    `💰 Jumlah : ${formatCurrency(amount)}`,
+    `📋 Catatan : ${note || "Tanpa deskripsi"}`,
+    `🏦 Sumber Dana : ${goal.account_name}`,
+    `🎯 Target Tabungan : ${goal.name}`,
+    `💵 Sisa Tabungan : ${formatCurrency(remaining)}`,
+  ].join("\n");
+}
+
+function buildExpenseRecordedMessage({
+  category,
+  amount,
+  note,
+  message,
+  accountName,
+  remainingBalance,
+}) {
+  const lines = [
+    "Pengeluaran tercatat.",
+    "",
+    `⏰ Waktu : ${formatTelegramDateTime(message?.date)}`,
+    `🗂 Kategori : ${category}`,
+    "🧾 Tipe : Pengeluaran",
+    `💰 Jumlah : ${formatCurrency(amount)}`,
+    `📋 Catatan : ${note || "Tanpa deskripsi"}`,
+    `🏦 Sumber Dana : ${accountName}`,
+  ];
+  if (remainingBalance !== undefined && remainingBalance !== null) {
+    lines.push(`💵 Sisa Tabungan : ${formatCurrency(remainingBalance)}`);
+  }
+  return lines.join("\n");
+}
+
+function savingInputButton() {
+  return {
+    inline_keyboard: [[{ text: "Menu", callback_data: "menu:show" }]],
+  };
+}
+
+function buildCommandMenu() {
+  return [
+    "Menu KasGue",
+    "",
+    "Laporan & Rekap:",
+    "/laporan - laporan bulan ini",
+    "/laporan_sheet - generate laporan Google Sheets",
+    "/rekap - rekap bulan ini",
+    "/rekap minggu - rekap minggu ini",
+    "/rekap 2026-06 - rekap bulan tertentu",
+    "/rekap kategori makanan - filter kategori",
+    "",
+    "Tabungan:",
+    "/tabungan - lihat tabungan/aset tercatat",
+    "/buat_tabungan - menu tabungan dan target",
+    "",
+    "Bantuan:",
+    "/ringkas - saran hemat dari AI",
+    "/bantuan - tips keuangan",
+  ].join("\n");
+}
+
+async function handleMainMenuCallback(config, callbackQuery) {
+  await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id);
+  await sendTelegramChat(
+    config.financeTelegramBotToken,
+    callbackQuery.message?.chat?.id,
+    buildCommandMenu(),
+  );
+}
+
+function savingInputMenu() {
+  return {
+    inline_keyboard: [
+      [{ text: "Catat Tabungan Baru", callback_data: "saving:record_asset" }],
+      [{ text: "Buat Target Tabungan", callback_data: "saving:create_goal" }],
+      [{ text: "Tambah Saldo Target", callback_data: "saving:add_balance" }],
+      [{ text: "Lihat Semua Tabungan", callback_data: "saving:view" }],
+    ],
+  };
+}
+
+async function handleSavingInputMenuCallback(db, config, callbackQuery) {
+  const action = String(callbackQuery.data || "").split(":")[1];
+  if (!action) return false;
+  const chatId = callbackQuery.message?.chat?.id;
+  await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id);
+
+  if (action === "menu") {
+    await sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      "Pilih aktivitas tabungan:",
+      { reply_markup: savingInputMenu() },
+    );
+    return true;
+  }
+
+  const messages = {
+    create_goal: [
+      "Buat Target Tabungan",
+      "",
+      "Gunakan untuk membuat tujuan menabung. Tuliskan nama target, nominal tujuan, rekening, dan saldo awal jika sudah ada.",
+      "",
+      "Contoh:",
+      "• Buat target tabungan Dana Darurat 20 juta di blu BCA",
+      "• Saya mau bikin tabungan Liburan Bali target 10 juta di Bank BCA",
+      "• Buat target Beli Laptop 15 juta di Jago, saldo awal 2 juta",
+      "",
+      "Bot akan mengambil:",
+      "🎯 Nama target: Dana Darurat",
+      "💰 Target nominal: Rp 20.000.000",
+      "🏦 Rekening: blu BCA",
+      "💵 Saldo awal: boleh Rp0 atau saldo yang sudah terkumpul",
+    ].join("\n"),
+    add_balance: [
+      "Tambah Saldo Target",
+      "",
+      "Tuliskan nominal yang ditabung dan nama targetnya.",
+      "",
+      "Contoh:",
+      "• Tabung 500 ribu ke Dana Darurat",
+      "• Tambahkan 1 juta ke tabungan Liburan Bali",
+      "• Saya menabung 250 ribu untuk Beli Laptop",
+    ].join("\n"),
+    record_asset: [
+      "Catat Tabungan Baru",
+      "",
+      "Gunakan untuk mencatat rekening/tabungan yang sudah dimiliki tanpa menetapkan target nominal.",
+      "",
+      "Contoh:",
+      "• Saya punya tabungan 7 juta di blu BCA",
+      "• Saldo deposito saya 25 juta di Bank BRI",
+    ].join("\n"),
+  };
+
+  if (action === "view") {
+    const [users] = await db.query(
+      "SELECT uuid FROM finance_users WHERE telegram_user_id = ? LIMIT 1",
+      [Number(callbackQuery.from?.id || 0)],
+    );
+    const goals = users[0]?.uuid ? await getActiveSavingGoals(db, users[0].uuid) : [];
+    const assets = await getSavingSummary(db, Number(callbackQuery.from?.id || 0));
+    await sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      buildCompleteSavingReport(goals, assets),
+      { reply_markup: savingInputButton() },
+    );
+    return true;
+  }
+
+  if (messages[action]) {
+    await sendTelegramChat(config.financeTelegramBotToken, chatId, messages[action], {
+      reply_markup: savingInputButton(),
+    });
+    return true;
+  }
+  return false;
+}
+
 function slugify(value) {
   return (
     String(value || "")
@@ -154,8 +369,8 @@ async function upsertFinanceUser(db, message) {
   await db.query(
     `
       INSERT INTO finance_users
-        (telegram_user_id, telegram_chat_id, telegram_username, first_name, last_name, language_code, last_seen_at)
-      VALUES (?, ?, ?, ?, ?, ?, NOW())
+        (uuid, telegram_user_id, telegram_chat_id, telegram_username, first_name, last_name, language_code, last_seen_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
       ON DUPLICATE KEY UPDATE
         telegram_chat_id = VALUES(telegram_chat_id),
         telegram_username = VALUES(telegram_username),
@@ -166,6 +381,7 @@ async function upsertFinanceUser(db, message) {
         updated_at = NOW()
     `,
     [
+      randomUUID(),
       Number(user.id || 0),
       Number(chat.id || 0),
       user.username || null,
@@ -182,15 +398,108 @@ async function upsertFinanceUser(db, message) {
 
 async function getOrCreateDefaultAccount(db, userId) {
   const [existing] = await db.query(
-    "SELECT id FROM finance_accounts WHERE user_id = ? AND is_default = TRUE LIMIT 1",
+    "SELECT id, uuid, name FROM finance_accounts WHERE user_id = ? AND is_default = TRUE LIMIT 1",
     [userId],
   );
-  if (existing.length) return existing[0].id;
+  if (existing.length) return existing[0];
+  const accountUuid = randomUUID();
   const [result] = await db.query(
-    "INSERT INTO finance_accounts (user_id, name, account_type, currency, is_default) VALUES (?, 'Dompet Utama', 'cash', 'IDR', TRUE)",
-    [userId],
+    "INSERT INTO finance_accounts (uuid, user_id, name, account_type, currency, is_default) VALUES (?, ?, 'Dompet Utama', 'cash', 'IDR', TRUE)",
+    [accountUuid, userId],
   );
-  return result.insertId;
+  return { id: result.insertId, uuid: accountUuid, name: "Dompet Utama" };
+}
+
+async function getOrCreateAccountByName(db, userId, accountName, openingBalance = 0) {
+  const [existing] = await db.query(
+    "SELECT id, uuid, name FROM finance_accounts WHERE user_id = ? AND LOWER(name) = LOWER(?) LIMIT 1",
+    [userId, accountName],
+  );
+  if (existing.length) return existing[0];
+  const accountUuid = randomUUID();
+  const [result] = await db.query(
+    `INSERT INTO finance_accounts
+      (uuid, user_id, name, account_type, currency, opening_balance, is_default)
+     VALUES (?, ?, ?, 'bank', 'IDR', ?, FALSE)`,
+    [accountUuid, userId, accountName, Number(openingBalance || 0)],
+  );
+  return { id: result.insertId, uuid: accountUuid, name: accountName };
+}
+
+async function createSavingGoal(db, financeUser, input) {
+  const account = await getOrCreateAccountByName(db, financeUser.id, input.accountName);
+  const [existing] = await db.query(
+    `SELECT id FROM saving_goals
+     WHERE user_id = ? AND LOWER(name) = LOWER(?) AND status = 'active' LIMIT 1`,
+    [financeUser.uuid, input.name],
+  );
+  if (existing.length) throw new Error(`Target Tabungan ${input.name} sudah ada.`);
+  const id = randomUUID();
+  await db.query(
+    `INSERT INTO saving_goals
+      (id, user_id, bank_wallet_account_id, name, target_amount, initial_amount, status)
+     VALUES (?, ?, ?, ?, ?, ?, 'active')`,
+    [
+      id,
+      financeUser.uuid,
+      account.uuid,
+      input.name,
+      input.targetAmount,
+      Number(input.initialAmount || 0),
+    ],
+  );
+  return {
+    ...input,
+    id,
+    accountName: account.name,
+    account_name: account.name,
+    bank_wallet_account_id: account.uuid,
+    account_id: account.id,
+    balance: Number(input.initialAmount || 0),
+  };
+}
+
+async function resumePendingExpenseWithGoal(db, config, financeUser, goal, chatId) {
+  const [rows] = await db.query(
+    `SELECT * FROM transaction_drafts
+     WHERE user_id = ? AND status = 'pending' AND expires_at > NOW()
+       AND JSON_EXTRACT(context, '$.awaiting_saving_goal_creation') = TRUE
+     ORDER BY created_at DESC LIMIT 1`,
+    [financeUser.uuid],
+  );
+  const draft = rows[0];
+  if (!draft) return false;
+  const payload = typeof draft.payload === "string" ? JSON.parse(draft.payload) : draft.payload;
+  await db.query(
+    `UPDATE transaction_drafts
+     SET saving_goal_id = ?, bank_wallet_account_id = ?,
+         context = JSON_SET(context, '$.awaiting_saving_goal_creation', FALSE)
+     WHERE id = ?`,
+    [goal.id, goal.bank_wallet_account_id, draft.id],
+  );
+  await sendTelegramChat(
+    config.financeTelegramBotToken,
+    chatId,
+    buildExpenseConfirmation(payload, goal),
+    { reply_markup: expenseConfirmationKeyboard(draft.id, true) },
+  );
+  return true;
+}
+
+async function addSavingGoalDeposit(db, financeUser, input) {
+  const goals = await getActiveSavingGoals(db, financeUser.uuid);
+  const normalized = input.goalName.toLowerCase();
+  const goal =
+    goals.find((item) => item.name.toLowerCase() === normalized) ||
+    goals.find((item) => item.name.toLowerCase().includes(normalized));
+  if (!goal) throw new Error(`Target Tabungan ${input.goalName} tidak ditemukan.`);
+  await db.query(
+    `INSERT INTO saving_goal_entries
+      (id, saving_goal_id, transaction_id, entry_type, amount, entry_date, note)
+     VALUES (?, ?, NULL, 'deposit', ?, CURRENT_DATE(), 'Input dari Telegram')`,
+    [randomUUID(), goal.id, input.amount],
+  );
+  return { ...goal, balance: Number(goal.balance) + Number(input.amount) };
 }
 
 async function getOrCreateCategory(db, transactionType, categoryName) {
@@ -207,18 +516,21 @@ async function getOrCreateCategory(db, transactionType, categoryName) {
   return result.insertId;
 }
 
-async function saveFinanceTransaction(db, tx, message) {
+async function saveFinanceTransaction(db, tx, message, savingGoal = null, fundingAccount = null) {
   const chat = message.chat || {};
   const financeUser = await upsertFinanceUser(db, message);
-  const accountId = await getOrCreateDefaultAccount(db, financeUser.id);
+  const defaultAccount = await getOrCreateDefaultAccount(db, financeUser.id);
+  const accountId = savingGoal?.account_id || fundingAccount?.account_id || defaultAccount.id;
+  const entryUuid = randomUUID();
   const categoryId = await getOrCreateCategory(db, tx.transactionType, tx.category);
   await db.query(
     `
-      INSERT INTO finance_entries
-        (user_id, account_id, category_id, transaction_type, amount, currency, description, raw_text, source, source_message_id, source_chat_id, occurred_at)
-      VALUES (?, ?, ?, ?, ?, 'IDR', ?, ?, 'telegram', ?, ?, NOW())
+      INSERT INTO transactions
+        (uuid, user_id, account_id, category_id, transaction_type, amount, currency, description, raw_text, source, source_message_id, source_chat_id, saving_goal_id, occurred_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'IDR', ?, ?, 'telegram_bot', ?, ?, ?, NOW())
     `,
     [
+      entryUuid,
       financeUser.id,
       accountId,
       categoryId,
@@ -228,13 +540,28 @@ async function saveFinanceTransaction(db, tx, message) {
       message.text || null,
       Number(message.message_id || 0),
       Number(chat.id || 0),
+      savingGoal?.id || null,
     ],
   );
+  if (savingGoal) {
+    await db.query(
+      `INSERT INTO saving_goal_entries
+        (id, saving_goal_id, transaction_id, entry_type, amount, entry_date, note)
+       VALUES (?, ?, ?, 'expense', ?, CURRENT_DATE(), ?)`,
+      [randomUUID(), savingGoal.id, entryUuid, tx.amount, tx.description],
+    );
+  }
+  return {
+    financeUser,
+    entryUuid,
+    accountName: savingGoal?.account_name || fundingAccount?.account_name || defaultAccount.name,
+  };
 }
 
 async function saveSavingSnapshot(db, saving, message) {
   const chat = message.chat || {};
   const financeUser = await upsertFinanceUser(db, message);
+  await getOrCreateAccountByName(db, financeUser.id, saving.accountName, saving.amount);
   await db.query(
     `
       INSERT INTO finance_savings
@@ -364,11 +691,19 @@ function applyOwnerDirectionOverride(receipt, ownerHints) {
   return receipt;
 }
 
-async function saveReceiptFromOcr(db, receipt, message, fileId) {
+async function saveReceiptFromOcr(
+  db,
+  receipt,
+  message,
+  fileId,
+  savingGoal = null,
+  fundingAccount = null,
+) {
   const financeUser = await upsertFinanceUser(db, message);
   const ownerHints = getOwnerHintsFromUser(financeUser);
   receipt = applyOwnerDirectionOverride(receipt, ownerHints);
-  const accountId = await getOrCreateDefaultAccount(db, financeUser.id);
+  const defaultAccount = await getOrCreateDefaultAccount(db, financeUser.id);
+  const accountId = savingGoal?.account_id || fundingAccount?.account_id || defaultAccount.id;
   const totalAmount = asNumber(receipt.total_amount);
   const transactionAt = toMysqlDateTime(receipt.transaction_datetime);
   if (!totalAmount) throw new Error("Total struk tidak terbaca. Coba foto ulang lebih jelas.");
@@ -393,13 +728,15 @@ async function saveReceiptFromOcr(db, receipt, message, fileId) {
           .filter(Boolean)
           .join(" ")
       : `${receipt.merchant_name || "Struk belanja"}${receipt.merchant_branch ? ` ${receipt.merchant_branch}` : ""}`.trim();
+  const entryUuid = randomUUID();
   const [entryResult] = await db.query(
     `
-      INSERT INTO finance_entries
-        (user_id, account_id, category_id, transaction_type, amount, currency, description, raw_text, source, source_message_id, source_chat_id, occurred_at)
-      VALUES (?, ?, ?, ?, ?, 'IDR', ?, ?, 'telegram', ?, ?, COALESCE(?, NOW()))
+      INSERT INTO transactions
+        (uuid, user_id, account_id, category_id, transaction_type, amount, currency, description, raw_text, source, source_message_id, source_chat_id, saving_goal_id, occurred_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'IDR', ?, ?, 'telegram_bot', ?, ?, ?, COALESCE(?, NOW()))
     `,
     [
+      entryUuid,
       financeUser.id,
       accountId,
       categoryId,
@@ -409,15 +746,25 @@ async function saveReceiptFromOcr(db, receipt, message, fileId) {
       "OCR receipt",
       Number(message.message_id || 0),
       Number(message.chat?.id || 0),
+      savingGoal?.id || null,
       transactionAt,
     ],
   );
+
+  if (savingGoal && transactionType === "expense") {
+    await db.query(
+      `INSERT INTO saving_goal_entries
+        (id, saving_goal_id, transaction_id, entry_type, amount, entry_date, note)
+       VALUES (?, ?, ?, 'expense', ?, COALESCE(DATE(?), CURRENT_DATE()), ?)`,
+      [randomUUID(), savingGoal.id, entryUuid, totalAmount, transactionAt, description],
+    );
+  }
 
   const [receiptResult] = await db.query(
     `
       INSERT INTO finance_receipts
         (
-          user_id, entry_id, merchant_name, merchant_branch, receipt_number,
+          user_id, transaction_id, merchant_name, merchant_branch, receipt_number,
           document_type, bank_name, sender_name, receiver_name, transaction_at,
           subtotal, discount_total, tax_total, total_amount, payment_method,
           source_chat_id, source_message_id, telegram_file_id, ocr_model, ocr_raw, status
@@ -475,6 +822,8 @@ async function saveReceiptFromOcr(db, receipt, message, fileId) {
     transactionType,
     categoryName,
     documentType,
+    entryUuid,
+    accountName: savingGoal?.account_name || fundingAccount?.account_name || defaultAccount.name,
   };
 }
 
@@ -488,7 +837,24 @@ async function handleReceiptPhoto(db, config, message) {
   await sendTelegramChat(config.financeTelegramBotToken, message.chat.id, "Saya baca struknya dulu ya...");
   const file = await getTelegramFile(config.financeTelegramBotToken, photo.file_id);
   const imageBuffer = await downloadTelegramFile(config.financeTelegramBotToken, file.file_path);
-  const receipt = await ocrReceiptImage(imageBuffer, ownerHints, "image/jpeg");
+  let receipt = await ocrReceiptImage(imageBuffer, ownerHints, "image/jpeg");
+  receipt = applyOwnerDirectionOverride(receipt, ownerHints);
+  const documentType = String(receipt.document_type || "receipt_expense").toLowerCase();
+  if (config.savingGoalFeatureEnabled && documentType !== "transfer_income") {
+    const merchantNote =
+      receipt.merchant_name || receipt.bank_name
+        ? `${receipt.merchant_name || receipt.bank_name}${compactLocation(receipt.merchant_branch) ? ` - ${compactLocation(receipt.merchant_branch)}` : ""}`
+        : "Dari gambar";
+    const payload = {
+      receipt,
+      fileId: photo.file_id,
+      message: compactTelegramMessage(message),
+      category: documentType === "transfer_expense" ? "Transfer Keluar" : "Belanja & Hadiah",
+      amount: asNumber(receipt.total_amount),
+      note: String(message.caption || "").trim() || merchantNote,
+    };
+    return await createAndSendExpenseDraft(db, config, financeUser, "receipt_expense", payload);
+  }
   const saved = await saveReceiptFromOcr(db, receipt, message, photo.file_id);
   const label = saved.transactionType === "income" ? "Pemasukan" : "Pengeluaran";
   const merchantNote =
@@ -507,7 +873,441 @@ async function handleReceiptPhoto(db, config, message) {
       note: userCaption || merchantNote,
       message,
     }),
+    { reply_markup: savingInputButton() },
   );
+}
+
+function compactTelegramMessage(message) {
+  return {
+    message_id: Number(message.message_id || 0),
+    date: Number(message.date || Math.floor(Date.now() / 1000)),
+    text: message.text || null,
+    caption: message.caption || null,
+    chat: { id: Number(message.chat?.id || 0) },
+    from: {
+      id: Number(message.from?.id || 0),
+      username: message.from?.username || null,
+      first_name: message.from?.first_name || null,
+      last_name: message.from?.last_name || null,
+      language_code: message.from?.language_code || null,
+    },
+  };
+}
+
+async function getActiveSavingGoals(db, userUuid) {
+  const [rows] = await db.query(
+    `
+      SELECT
+        sg.id, sg.name, sg.target_amount, sg.initial_amount, sg.target_date,
+        sg.bank_wallet_account_id,
+        a.id AS account_id, a.name AS account_name,
+        sg.initial_amount + COALESCE(SUM(
+          CASE
+            WHEN sge.entry_type IN ('initial_allocation', 'deposit', 'contribution', 'transfer_in') THEN sge.amount
+            WHEN sge.entry_type IN ('expense', 'withdrawal', 'transfer_out') THEN -sge.amount
+            ELSE 0
+          END
+        ), 0) AS balance
+      FROM saving_goals sg
+      JOIN finance_accounts a ON a.uuid = sg.bank_wallet_account_id
+      LEFT JOIN saving_goal_entries sge ON sge.saving_goal_id = sg.id
+      WHERE sg.user_id = ? AND sg.status = 'active'
+      GROUP BY sg.id, sg.name, sg.initial_amount, sg.bank_wallet_account_id, a.id, a.name
+      ORDER BY sg.created_at ASC, sg.name ASC
+    `,
+    [userUuid],
+  );
+  return rows;
+}
+
+async function getSavingFundingAccounts(db, userUuid) {
+  const [rows] = await db.query(
+    `
+      SELECT
+        a.id AS account_id,
+        a.uuid AS bank_wallet_account_id,
+        a.name AS account_name,
+        a.opening_balance + COALESCE(SUM(
+          CASE
+            WHEN t.transaction_type = 'income' THEN t.amount
+            WHEN t.transaction_type = 'expense' THEN -t.amount
+            ELSE 0
+          END
+        ), 0) AS balance
+      FROM finance_accounts a
+      JOIN finance_users u ON u.id = a.user_id
+      LEFT JOIN transactions t ON t.account_id = a.id AND t.deleted_at IS NULL
+      LEFT JOIN saving_goals sg
+        ON sg.bank_wallet_account_id = a.uuid AND sg.status = 'active'
+      WHERE u.uuid = ?
+        AND a.is_default = FALSE
+        AND a.archived_at IS NULL
+        AND sg.id IS NULL
+      GROUP BY a.id, a.uuid, a.name, a.opening_balance
+      ORDER BY a.created_at ASC, a.name ASC
+    `,
+    [userUuid],
+  );
+  return rows;
+}
+
+function findMentionedSavingGoal(text, goals) {
+  const normalized = String(text || "").toLowerCase();
+  return goals.find((goal) => normalized.includes(String(goal.name).toLowerCase())) || null;
+}
+
+async function createTransactionDraft(db, financeUser, draftType, payload, savingGoal = null) {
+  const id = randomUUID();
+  const categoryId = await getOrCreateCategory(db, "expense", payload.category);
+  const occurredAt = new Date(Number(payload.message?.date || Date.now() / 1000) * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", " ");
+  await db.query(
+    `INSERT INTO transaction_drafts
+      (id, user_id, bank_wallet_account_id, category_id,
+       transaction_type, amount, currency, description, occurred_at,
+       source, source_reference, context, draft_type, payload, saving_goal_id, expires_at)
+     VALUES (?, ?, ?, ?, 'expense', ?, 'IDR', ?, ?, 'telegram_bot', ?, CAST(? AS JSON), ?, CAST(? AS JSON), ?, DATE_ADD(NOW(), INTERVAL 30 MINUTE))`,
+    [
+      id,
+      financeUser.uuid,
+      savingGoal?.bank_wallet_account_id || null,
+      categoryId,
+      payload.amount,
+      payload.note || null,
+      occurredAt,
+      `telegram:${Number(payload.message?.chat?.id || 0)}:${Number(payload.message?.message_id || 0)}`,
+      JSON.stringify({
+        chat_id: Number(payload.message?.chat?.id || 0),
+        message_id: Number(payload.message?.message_id || 0),
+      }),
+      draftType,
+      JSON.stringify(payload),
+      savingGoal?.id || null,
+    ],
+  );
+  return id;
+}
+
+function buildExpenseConfirmation(payload, goal = null, fundingAccount = null) {
+  const lines = [
+    "Konfirmasi pengeluaran:",
+    "",
+    `🗂 Kategori : ${payload.category}`,
+    `💰 Jumlah : ${formatCurrency(payload.amount)}`,
+    `📋 Catatan : ${payload.note || "Tanpa deskripsi"}`,
+  ];
+  if (goal) {
+    lines.push(`🏦 Sumber Dana : ${goal.account_name}`);
+    lines.push(`🎯 Target Tabungan : ${goal.name}`);
+    lines.push(`💵 Saldo Saat Ini : ${formatCurrency(goal.balance)}`);
+    lines.push(
+      `💵 Sisa Setelah Disimpan : ${formatCurrency(Number(goal.balance) - Number(payload.amount))}`,
+    );
+  } else if (fundingAccount) {
+    lines.push(`🏦 Sumber Dana : ${fundingAccount.account_name}`);
+    lines.push(`💵 Saldo Saat Ini : ${formatCurrency(fundingAccount.balance)}`);
+    lines.push(
+      `💵 Sisa Setelah Disimpan : ${formatCurrency(
+        Number(fundingAccount.balance) - Number(payload.amount),
+      )}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function expenseConfirmationKeyboard(draftId, hasGoal, hasFundingAccount = false) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Simpan", callback_data: `sg:save:${draftId}` },
+        {
+          text: hasGoal || hasFundingAccount ? "Ganti Sumber" : "Ambil dari Tabungan",
+          callback_data: `sg:choose:${draftId}`,
+        },
+      ],
+      [{ text: "Batal", callback_data: `sg:cancel:${draftId}` }],
+    ],
+  };
+}
+
+async function createAndSendExpenseDraft(db, config, financeUser, draftType, payload) {
+  if (!payload.amount) throw new Error("Nominal pengeluaran tidak terbaca.");
+  const goals = await getActiveSavingGoals(db, financeUser.uuid);
+  const fundingAccounts = await getSavingFundingAccounts(db, financeUser.uuid);
+  const sourceText = payload.message?.caption || payload.message?.text || "";
+  const mentionedGoal =
+    findMentionedSavingGoal(sourceText, goals) ||
+    findMentionedSavingGoal(payload.savingGoalName, goals);
+  const draftId = await createTransactionDraft(
+    db,
+    financeUser,
+    draftType,
+    payload,
+    mentionedGoal,
+  );
+  if (
+    !mentionedGoal &&
+    (payload.usesSavingGoal || /\b(?:dari|pakai|gunakan)\s+(?:target\s+)?(?:tabungan|simpanan)\b/i.test(sourceText))
+  ) {
+    return sendSavingGoalChoices(
+      config,
+      payload.message.chat.id,
+      draftId,
+      goals,
+      fundingAccounts,
+    );
+  }
+  return sendTelegramChat(
+    config.financeTelegramBotToken,
+    payload.message.chat.id,
+    buildExpenseConfirmation(payload, mentionedGoal),
+    { reply_markup: expenseConfirmationKeyboard(draftId, Boolean(mentionedGoal)) },
+  );
+}
+
+async function sendSavingGoalChoices(config, chatId, draftId, goals, fundingAccounts = []) {
+  if (!goals.length && !fundingAccounts.length) {
+    return sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      [
+        "Anda belum memiliki Target Tabungan aktif.",
+        "",
+        "Pengeluaran belum disimpan. Anda bisa mencatatnya dari Dompet Utama atau membatalkan pencatatan.",
+      ].join("\n"),
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Buat Target Tabungan", callback_data: `sg:new:${draftId}` }],
+            [{ text: "Catat dari Dompet Utama", callback_data: `sg:save:${draftId}` }],
+            [{ text: "Batal", callback_data: `sg:cancel:${draftId}` }],
+          ],
+        },
+      },
+    );
+  }
+  return sendTelegramChat(
+    config.financeTelegramBotToken,
+    chatId,
+    "Pilih sumber tabungan yang akan dipakai:",
+    {
+      reply_markup: {
+        inline_keyboard: [
+          ...goals.map((goal, index) => [
+            {
+              text: `${goal.name} (${formatCurrency(goal.balance)})`,
+              callback_data: `sg:goal:${draftId}:${index}`,
+            },
+          ]),
+          ...fundingAccounts.map((account, index) => [
+            {
+              text: `${account.account_name} (${formatCurrency(account.balance)})`,
+              callback_data: `sg:account:${draftId}:${index}`,
+            },
+          ]),
+          [{ text: "Batal", callback_data: `sg:cancel:${draftId}` }],
+        ],
+      },
+    },
+  );
+}
+
+async function getDraftForCallback(db, draftId, telegramUserId) {
+  const [rows] = await db.query(
+    `SELECT d.*, u.telegram_user_id
+     FROM transaction_drafts d
+     JOIN finance_users u ON u.uuid = d.user_id
+     WHERE d.id = ? AND u.telegram_user_id = ? AND d.status = 'pending'
+       AND d.expires_at > NOW() LIMIT 1`,
+    [draftId, Number(telegramUserId || 0)],
+  );
+  return rows[0] || null;
+}
+
+async function getSavingGoalById(db, goalId, userUuid) {
+  const goals = await getActiveSavingGoals(db, userUuid);
+  return goals.find((goal) => goal.id === goalId) || null;
+}
+
+async function getSavingFundingAccountById(db, accountUuid, userUuid) {
+  const accounts = await getSavingFundingAccounts(db, userUuid);
+  return accounts.find((account) => account.bank_wallet_account_id === accountUuid) || null;
+}
+
+async function handleSavingGoalCallback(db, config, callbackQuery) {
+  const data = String(callbackQuery.data || "");
+  const parts = data.split(":");
+  if (parts[0] !== "sg") return false;
+  if (!config.savingGoalFeatureEnabled) {
+    await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Fitur Target Tabungan sedang dinonaktifkan.");
+    return true;
+  }
+  const action = parts[1];
+  const draftId = parts[2];
+  const draft = await getDraftForCallback(db, draftId, callbackQuery.from?.id);
+  if (!draft) {
+    await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Konfirmasi sudah kedaluwarsa atau diproses.");
+    return true;
+  }
+  const payload = typeof draft.payload === "string" ? JSON.parse(draft.payload) : draft.payload;
+  const chatId = callbackQuery.message?.chat?.id || payload.message?.chat?.id;
+
+  if (action === "cancel") {
+    await db.query("UPDATE transaction_drafts SET status = 'cancelled' WHERE id = ?", [draftId]);
+    await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Dibatalkan.");
+    await clearTelegramInlineKeyboard(config.financeTelegramBotToken, chatId, callbackQuery.message.message_id);
+    await sendTelegramChat(config.financeTelegramBotToken, chatId, "Pencatatan pengeluaran dibatalkan.");
+    return true;
+  }
+
+  const goals = await getActiveSavingGoals(db, draft.user_id);
+  const fundingAccounts = await getSavingFundingAccounts(db, draft.user_id);
+  if (action === "choose") {
+    await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id);
+    await sendSavingGoalChoices(config, chatId, draftId, goals, fundingAccounts);
+    return true;
+  }
+
+  if (action === "new") {
+    await db.query(
+      `UPDATE transaction_drafts
+       SET context = JSON_SET(COALESCE(context, JSON_OBJECT()), '$.awaiting_saving_goal_creation', TRUE)
+       WHERE id = ?`,
+      [draftId],
+    );
+    await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id);
+    await sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      [
+        "Buat Target Tabungan",
+        "",
+        "Tuliskan nama target, nominal tujuan, dan rekening penyimpanannya.",
+        "",
+        "Contoh:",
+        "• Buat target tabungan Dana Darurat 20 juta di blu BCA",
+        "• Saya mau bikin tabungan Biaya Rumah Sakit target 5 juta di Bank BCA",
+        "• Buatkan target Liburan 10 juta di Jago",
+        "",
+        "Setelah target dibuat, pengeluaran ini akan kembali ditampilkan untuk dikonfirmasi.",
+      ].join("\n"),
+    );
+    return true;
+  }
+
+  if (action === "goal") {
+    const selected = goals[Number(parts[3])];
+    if (!selected) {
+      await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Target tidak tersedia.");
+      return true;
+    }
+    await db.query(
+      "UPDATE transaction_drafts SET saving_goal_id = ?, bank_wallet_account_id = ? WHERE id = ?",
+      [selected.id, selected.bank_wallet_account_id, draftId],
+    );
+    await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Target dipilih.");
+    await sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      buildExpenseConfirmation(payload, selected),
+      { reply_markup: expenseConfirmationKeyboard(draftId, true) },
+    );
+    return true;
+  }
+
+  if (action === "account") {
+    const selected = fundingAccounts[Number(parts[3])];
+    if (!selected) {
+      await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Tabungan tidak tersedia.");
+      return true;
+    }
+    await db.query(
+      "UPDATE transaction_drafts SET saving_goal_id = NULL, bank_wallet_account_id = ? WHERE id = ?",
+      [selected.bank_wallet_account_id, draftId],
+    );
+    await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Sumber dana dipilih.");
+    await sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      buildExpenseConfirmation(payload, null, selected),
+      { reply_markup: expenseConfirmationKeyboard(draftId, false, true) },
+    );
+    return true;
+  }
+
+  if (action !== "save") return true;
+  const goal = draft.saving_goal_id
+    ? await getSavingGoalById(db, draft.saving_goal_id, draft.user_id)
+    : null;
+  const fundingAccount =
+    !goal && draft.bank_wallet_account_id
+      ? await getSavingFundingAccountById(db, draft.bank_wallet_account_id, draft.user_id)
+      : null;
+  const connection = await db.getConnection();
+  let saved;
+  try {
+    await connection.beginTransaction();
+    if (draft.draft_type === "receipt_expense") {
+      saved = await saveReceiptFromOcr(
+        connection,
+        payload.receipt,
+        payload.message,
+        payload.fileId,
+        goal,
+        fundingAccount,
+      );
+    } else {
+      saved = await saveFinanceTransaction(
+        connection,
+        payload.tx,
+        payload.message,
+        goal,
+        fundingAccount,
+      );
+    }
+    await connection.query("UPDATE transaction_drafts SET status = 'saved' WHERE id = ?", [
+      draftId,
+    ]);
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  await answerTelegramCallback(config.financeTelegramBotToken, callbackQuery.id, "Pengeluaran disimpan.");
+  await clearTelegramInlineKeyboard(config.financeTelegramBotToken, chatId, callbackQuery.message.message_id);
+  const remainingGoal = goal ? await getSavingGoalById(db, goal.id, draft.user_id) : null;
+  const remainingAccount = fundingAccount
+    ? await getSavingFundingAccountById(
+        db,
+        fundingAccount.bank_wallet_account_id,
+        draft.user_id,
+      )
+    : null;
+  const successMessage = goal
+    ? buildSavingGoalRecordedMessage({
+        category: payload.category,
+        amount: payload.amount,
+        note: payload.note,
+        message: payload.message,
+        goal,
+        remaining: remainingGoal?.balance ?? Number(goal.balance) - Number(payload.amount),
+      })
+    : buildExpenseRecordedMessage({
+        category: payload.category,
+        amount: payload.amount,
+        note: payload.note,
+        message: payload.message,
+        accountName: saved.accountName,
+        remainingBalance: remainingAccount?.balance,
+      });
+  await sendTelegramChat(config.financeTelegramBotToken, chatId, successMessage, {
+    reply_markup: savingInputButton(),
+  });
+  return Boolean(saved) || true;
 }
 
 async function getFinanceUserId(db, telegramUserId) {
@@ -524,7 +1324,7 @@ async function getMonthlyFinanceSummary(db, telegramUserId) {
   const [rows] = await db.query(
     `
       SELECT e.transaction_type, COALESCE(c.name, 'Lainnya') AS category, SUM(e.amount) AS total
-      FROM finance_entries e
+      FROM transactions e
       LEFT JOIN finance_categories c ON c.id = e.category_id
       WHERE e.user_id = ?
         AND e.deleted_at IS NULL
@@ -604,7 +1404,7 @@ async function getFinanceSummary(db, telegramUserId, options) {
   const [rows] = await db.query(
     `
       SELECT e.transaction_type, COALESCE(c.name, 'Lainnya') AS category, SUM(e.amount) AS total, COUNT(*) AS count
-      FROM finance_entries e
+      FROM transactions e
       LEFT JOIN finance_categories c ON c.id = e.category_id
       WHERE e.user_id = ?
         AND e.deleted_at IS NULL
@@ -650,6 +1450,48 @@ function buildSavingReport(rows) {
   }
   lines.push("");
   lines.push(`Total tabungan tercatat: ${formatCurrency(total)}`);
+  return lines.join("\n");
+}
+
+function buildCompleteSavingReport(goals, assets) {
+  if (!goals.length && !assets.length) {
+    return [
+      "Belum ada data tabungan.",
+      "",
+      "Buat tabungan baru dengan command:",
+      "/buat_tabungan",
+    ].join("\n");
+  }
+
+  const lines = ["Ringkasan Tabungan", ""];
+  if (goals.length) {
+    lines.push("Target Tabungan:");
+    for (const goal of goals) {
+      const balance = Number(goal.balance || 0);
+      const target = Number(goal.target_amount || 0);
+      const progress = target > 0 ? Math.min((balance / target) * 100, 999).toFixed(1) : null;
+      lines.push(`🎯 ${goal.name}`);
+      lines.push(`🏦 Rekening : ${goal.account_name}`);
+      lines.push(`💵 Saldo : ${formatCurrency(balance)}`);
+      if (target > 0) {
+        lines.push(`💰 Target : ${formatCurrency(target)}`);
+        lines.push(`📊 Progres : ${progress}%`);
+      }
+      lines.push("");
+    }
+    const goalTotal = goals.reduce((sum, goal) => sum + Number(goal.balance || 0), 0);
+    lines.push(`Total saldo target: ${formatCurrency(goalTotal)}`);
+  }
+
+  if (assets.length) {
+    if (goals.length) lines.push("");
+    lines.push("Saldo / Aset Tercatat:");
+    for (const asset of assets) {
+      lines.push(`- ${asset.account_name}: ${formatCurrency(asset.amount)}`);
+    }
+    const assetTotal = assets.reduce((sum, asset) => sum + Number(asset.amount || 0), 0);
+    lines.push(`Total saldo/aset: ${formatCurrency(assetTotal)}`);
+  }
   return lines.join("\n");
 }
 
@@ -804,9 +1646,92 @@ async function askFinanceAI(userMessage, systemPrompt) {
   return data.choices?.[0]?.message?.content?.trim() || "Maaf, AI belum memberi jawaban.";
 }
 
-export async function handleFinanceTelegramMessage(message) {
-  if (!message?.chat?.id) return;
+async function extractFinanceIntentWithAI(text) {
   const config = getConfig();
+  if (!config.useOpenAI || !config.openAIKey || !text) return null;
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.openAIKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: config.financeOpenAIModel,
+        temperature: 0,
+        max_tokens: 300,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Ekstrak intent keuangan bahasa Indonesia menjadi JSON saja.",
+              "Schema: intent salah satu expense,income,create_saving_goal,add_saving_goal_balance,saving_snapshot,unknown; amount number|null; category string|null; description string|null; saving_goal_name string|null; account_name string|null; target_amount number|null; initial_amount number|null; uses_saving_goal boolean.",
+              "Kategori pengeluaran: Makanan & Minuman, Transport, Utilitas, Entertainment, Belanja & Hadiah, Kesehatan, Tagihan & Cicilan, Transfer Keluar, Lainnya.",
+              "Kata tabungan pada frasa 'dari tabungan' adalah sumber dana, bukan kategori.",
+              "Contoh 'bayar rumah sakit 500 ribu dari tabungan' => expense, amount 500000, category Kesehatan, description tagihan rumah sakit, uses_saving_goal true.",
+              "Contoh 'bayar kartu kredit 350000' => expense, amount 350000, category Tagihan & Cicilan, description bayar kartu kredit.",
+              "Contoh 'buat dana darurat target 20 juta di blu BCA' => create_saving_goal, saving_goal_name Dana Darurat, target_amount 20000000, account_name blu BCA.",
+              "Contoh 'buat target laptop 15 juta di Jago saldo awal 2 juta' => create_saving_goal, saving_goal_name Laptop, target_amount 15000000, initial_amount 2000000, account_name Jago.",
+              "Contoh 'tabung 500 ribu ke dana darurat' => add_saving_goal_balance, amount 500000, saving_goal_name Dana Darurat.",
+              "Contoh 'saya punya tabungan 7 juta di blu BCA' => saving_snapshot, amount 7000000, account_name blu BCA.",
+              "Contoh 'gaji bulan ini 8 juta' => income, amount 8000000, category Gaji.",
+            ].join("\n"),
+          },
+          { role: "user", content: text },
+        ],
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const data = await response.json();
+    return JSON.parse(data.choices?.[0]?.message?.content || "null");
+  } catch (error) {
+    console.error("[finance:intent-ai]", error.message);
+    return null;
+  }
+}
+
+function transactionFromAIIntent(intent, fallbackTransaction = null) {
+  if (!intent || !["expense", "income"].includes(intent.intent) || !Number(intent.amount)) {
+    return null;
+  }
+  const aiCategory = String(intent.category || "").trim();
+  const aiDescription = String(intent.description || "").trim();
+  const genericDescription = /^(tanpa deskripsi|tidak ada|n\/a|null|-)?$/i.test(aiDescription);
+  return {
+    transactionType: intent.intent,
+    category:
+      (aiCategory && aiCategory !== "Lainnya" ? aiCategory : null) ||
+      fallbackTransaction?.category ||
+      (intent.intent === "income" ? "Pemasukan" : "Lainnya"),
+    description:
+      (!genericDescription ? aiDescription : null) ||
+      fallbackTransaction?.description ||
+      "Tanpa deskripsi",
+    amount: Number(intent.amount),
+  };
+}
+
+export async function handleFinanceTelegramMessage(message, update = {}) {
+  const config = getConfig();
+  const callbackQuery = update.callback_query;
+  if (callbackQuery) {
+    const callbackDb = await getDb();
+    await ensureSchema(callbackDb);
+    try {
+      if (String(callbackQuery.data || "").startsWith("saving:")) {
+        await handleSavingInputMenuCallback(callbackDb, config, callbackQuery);
+      } else if (String(callbackQuery.data || "").startsWith("menu:")) {
+        await handleMainMenuCallback(config, callbackQuery);
+      } else {
+        await handleSavingGoalCallback(callbackDb, config, callbackQuery);
+      }
+    } finally {
+      await callbackDb.end();
+    }
+    return;
+  }
+  if (!message?.chat?.id) return;
   const chatId = message.chat.id;
   const text = (message.text || message.caption || "").trim();
   const command = text.split(/\s+/)[0].split("@")[0].toLowerCase();
@@ -835,21 +1760,34 @@ export async function handleFinanceTelegramMessage(message) {
           "- makanan 50000 makan siang",
           "- gaji 5000000 gaji bulanan",
           "- pemasukan 250000 freelance",
-          "- tabungan 7000000 di blu BCA",
+          "- buat target tabungan Dana Darurat 20 juta di blu BCA, saldo awal 2 juta",
+          "- tabung 500 ribu ke Dana Darurat",
+          "- saya punya tabungan 7 juta di blu BCA",
           "- kirim foto struk Alfamart/Indomaret untuk OCR otomatis",
           "",
-          "Command:",
-          "/laporan - laporan bulan ini",
-          "/laporan_sheet - generate laporan Google Sheets",
-          "/tabungan - lihat tabungan/aset tercatat",
-          "/rekap - rekap bulan ini",
-          "/rekap minggu - rekap minggu ini",
-          "/rekap 2026-06 - rekap bulan tertentu",
-          "/rekap kategori makanan - filter kategori",
-          "/ringkas - saran hemat dari AI",
-          "/bantuan - tips keuangan",
-          "/sync_token - buat token untuk sync mobile app",
+          buildCommandMenu(),
         ].join("\n"),
+        { reply_markup: savingInputButton() },
+      );
+    }
+    if (command === "/buat_tabungan") {
+      return sendTelegramChat(
+        config.financeTelegramBotToken,
+        chatId,
+        [
+          "Menu Tabungan",
+          "",
+          "Pilih sesuai kebutuhan:",
+          "",
+          "Catat Tabungan Baru",
+          "Untuk rekening/tabungan yang sudah ada dan memiliki saldo.",
+          "Contoh: Saya punya tabungan 7 juta di blu BCA",
+          "",
+          "Buat Target Tabungan",
+          "Untuk tujuan menabung dengan nominal target.",
+          "Contoh: Buat target Dana Darurat 20 juta di blu BCA, saldo awal 2 juta",
+        ].join("\n"),
+        { reply_markup: savingInputMenu() },
       );
     }
     if (command === "/sync_token") {
@@ -869,8 +1807,11 @@ export async function handleFinanceTelegramMessage(message) {
       );
     }
     if (command === "/tabungan") {
-      const rows = await getSavingSummary(db, Number(message.from?.id || 0));
-      return sendTelegramChat(config.financeTelegramBotToken, chatId, buildSavingReport(rows));
+      const goals = await getActiveSavingGoals(db, financeUser.uuid);
+      const assets = await getSavingSummary(db, Number(message.from?.id || 0));
+      return sendTelegramChat(config.financeTelegramBotToken, chatId, buildCompleteSavingReport(goals, assets), {
+        reply_markup: savingInputButton(),
+      });
     }
     if (command === "/rekap") {
       const options = parseRekapOptions(text);
@@ -890,7 +1831,84 @@ export async function handleFinanceTelegramMessage(message) {
       return sendTelegramChat(config.financeTelegramBotToken, chatId, "Tips keuangan pribadi:\n1. Catat semua pemasukan dan pengeluaran.\n2. Pisahkan kebutuhan dan keinginan.\n3. Pakai metode 50-30-20.\n4. Review laporan tiap bulan.\n5. Siapkan dana darurat sebelum belanja besar.");
     }
 
-    const saving = parseSavingSnapshot(text);
+    const aiIntent = await extractFinanceIntentWithAI(text);
+    const savingGoalCreation =
+      aiIntent?.intent === "create_saving_goal" &&
+      aiIntent.saving_goal_name &&
+      Number(aiIntent.target_amount) &&
+      aiIntent.account_name
+        ? {
+            name: String(aiIntent.saving_goal_name),
+            targetAmount: Number(aiIntent.target_amount),
+            accountName: String(aiIntent.account_name),
+            initialAmount: Number(aiIntent.initial_amount || 0),
+          }
+        : parseSavingGoalCreation(text);
+    if (savingGoalCreation) {
+      let goal;
+      try {
+        goal = await createSavingGoal(db, financeUser, savingGoalCreation);
+      } catch (error) {
+        return sendTelegramChat(config.financeTelegramBotToken, chatId, error.message, {
+          reply_markup: savingInputButton(),
+        });
+      }
+      await sendTelegramChat(
+        config.financeTelegramBotToken,
+        chatId,
+        [
+          "Target Tabungan dibuat.",
+          "",
+          `🎯 Target : ${goal.name}`,
+          `🏦 Rekening : ${goal.accountName}`,
+          `💰 Target Nominal : ${formatCurrency(goal.targetAmount)}`,
+          `💵 Saldo Awal : ${formatCurrency(goal.initialAmount || 0)}`,
+        ].join("\n"),
+      );
+      return await resumePendingExpenseWithGoal(db, config, financeUser, goal, chatId);
+    }
+
+    const savingGoalDeposit =
+      aiIntent?.intent === "add_saving_goal_balance" &&
+      aiIntent.saving_goal_name &&
+      Number(aiIntent.amount)
+        ? {
+            goalName: String(aiIntent.saving_goal_name),
+            amount: Number(aiIntent.amount),
+          }
+        : parseSavingGoalDeposit(text);
+    if (savingGoalDeposit) {
+      let goal;
+      try {
+        goal = await addSavingGoalDeposit(db, financeUser, savingGoalDeposit);
+      } catch (error) {
+        return sendTelegramChat(config.financeTelegramBotToken, chatId, error.message, {
+          reply_markup: savingInputButton(),
+        });
+      }
+      return sendTelegramChat(
+        config.financeTelegramBotToken,
+        chatId,
+        [
+          "Saldo Target Tabungan ditambahkan.",
+          "",
+          `🎯 Target : ${goal.name}`,
+          `🏦 Rekening : ${goal.account_name}`,
+          `💰 Ditambahkan : ${formatCurrency(savingGoalDeposit.amount)}`,
+          `💵 Saldo Sekarang : ${formatCurrency(goal.balance)}`,
+        ].join("\n"),
+        { reply_markup: savingInputButton() },
+      );
+    }
+
+    const saving =
+      aiIntent?.intent === "saving_snapshot" && Number(aiIntent.amount)
+        ? {
+            accountName: String(aiIntent.account_name || "Tabungan"),
+            amount: Number(aiIntent.amount),
+            description: String(aiIntent.description || "Saldo tabungan"),
+          }
+        : parseSavingSnapshot(text);
     if (saving) {
       await saveSavingSnapshot(db, saving, message);
       return sendTelegramChat(
@@ -904,11 +1922,24 @@ export async function handleFinanceTelegramMessage(message) {
           note: saving.description,
           message,
         }),
+        { reply_markup: savingInputButton() },
       );
     }
 
-    const tx = parseFinanceTransaction(text);
+    const localTransaction = parseFinanceTransaction(text);
+    const tx = transactionFromAIIntent(aiIntent, localTransaction) || localTransaction;
     if (tx) {
+      if (config.savingGoalFeatureEnabled && tx.transactionType === "expense") {
+        return await createAndSendExpenseDraft(db, config, financeUser, "text_expense", {
+          tx,
+          message: compactTelegramMessage(message),
+          category: tx.category,
+          amount: tx.amount,
+          note: tx.description,
+          usesSavingGoal: Boolean(aiIntent?.uses_saving_goal),
+          savingGoalName: aiIntent?.saving_goal_name || null,
+        });
+      }
       await saveFinanceTransaction(db, tx, message);
       const label = tx.transactionType === "income" ? "Pemasukan" : "Pengeluaran";
       return sendTelegramChat(
@@ -922,6 +1953,7 @@ export async function handleFinanceTelegramMessage(message) {
           note: tx.description,
           message,
         }),
+        { reply_markup: savingInputButton() },
       );
     }
 

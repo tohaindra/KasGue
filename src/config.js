@@ -17,6 +17,7 @@ const defaults = {
   RECEIPT_OCR_MODEL: "gpt-4.1-mini",
   GOOGLE_SHEETS_ENABLED: "false",
   GOOGLE_SHEET_NAME: "Laporan Keuangan",
+  SAVING_GOAL_FEATURE_ENABLED: "false",
   IMPORTANT_KEYWORDS:
     "urgent,penting,invoice,payment,pembayaran,deadline,approval,kontrak,meeting,proposal",
   IMPORTANT_SENDERS: "",
@@ -68,6 +69,8 @@ export function getConfig() {
     googleServiceAccountKeyFile: env("GOOGLE_SERVICE_ACCOUNT_KEY_FILE"),
     googleSheetId: env("GOOGLE_SHEET_ID"),
     googleSheetName: env("GOOGLE_SHEET_NAME") || "Laporan Keuangan",
+    savingGoalFeatureEnabled:
+      String(env("SAVING_GOAL_FEATURE_ENABLED")).toLowerCase() === "true",
     importantKeywords: splitList(env("IMPORTANT_KEYWORDS")),
     importantSenders: splitList(env("IMPORTANT_SENDERS")),
   };

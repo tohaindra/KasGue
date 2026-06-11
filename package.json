@@ -6,7 +6,10 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js"
+    "check": "node --check src/server.js && node --check src/finance.js && node --check src/db.js && node --check src/telegram.js",
+    "db:backup": "node scripts/backup-db.js",
+    "db:migrate": "node scripts/migrate.js",
+    "db:verify-saving-goals": "node scripts/verify-saving-goals.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
