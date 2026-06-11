@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 
 CREATE TABLE IF NOT EXISTS finance_users (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  uuid CHAR(36) NOT NULL,
   telegram_user_id BIGINT NOT NULL,
   telegram_chat_id BIGINT NULL,
   telegram_username VARCHAR(255) NULL,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS finance_users (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
+  UNIQUE KEY unique_finance_users_uuid (uuid),
   UNIQUE KEY unique_finance_telegram_user (telegram_user_id),
   INDEX idx_finance_users_chat (telegram_chat_id)
 );
@@ -77,6 +79,7 @@ CREATE TABLE IF NOT EXISTS finance_categories (
 
 CREATE TABLE IF NOT EXISTS finance_accounts (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  uuid CHAR(36) NOT NULL,
   user_id BIGINT UNSIGNED NOT NULL,
   name VARCHAR(255) NOT NULL,
   account_type ENUM('cash', 'bank', 'ewallet', 'credit_card', 'other') NOT NULL DEFAULT 'cash',
@@ -87,6 +90,7 @@ CREATE TABLE IF NOT EXISTS finance_accounts (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
+  UNIQUE KEY unique_finance_accounts_uuid (uuid),
   UNIQUE KEY unique_finance_account_name (user_id, name),
   INDEX idx_finance_accounts_user (user_id),
   CONSTRAINT fk_finance_accounts_user
@@ -94,8 +98,31 @@ CREATE TABLE IF NOT EXISTS finance_accounts (
     ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS finance_entries (
+CREATE TABLE IF NOT EXISTS saving_goals (
+  id CHAR(36) NOT NULL,
+  user_id CHAR(36) NOT NULL,
+  bank_wallet_account_id CHAR(36) NOT NULL,
+  name VARCHAR(150) NOT NULL,
+  target_amount DECIMAL(18,2) NULL,
+  initial_amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+  target_date DATE NULL,
+  note TEXT NULL,
+  status VARCHAR(30) NOT NULL DEFAULT 'active',
+  color VARCHAR(20) NULL,
+  icon VARCHAR(50) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  INDEX idx_saving_goals_user_status (user_id, status),
+  INDEX idx_saving_goals_user_name (user_id, name),
+  INDEX idx_saving_goals_account (bank_wallet_account_id),
+  CONSTRAINT fk_saving_goals_user FOREIGN KEY (user_id) REFERENCES finance_users(uuid),
+  CONSTRAINT fk_saving_goals_account FOREIGN KEY (bank_wallet_account_id) REFERENCES finance_accounts(uuid)
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  uuid CHAR(36) NOT NULL,
   user_id BIGINT UNSIGNED NOT NULL,
   account_id BIGINT UNSIGNED NULL,
   category_id BIGINT UNSIGNED NULL,
@@ -104,28 +131,80 @@ CREATE TABLE IF NOT EXISTS finance_entries (
   currency CHAR(3) NOT NULL DEFAULT 'IDR',
   description TEXT NULL,
   raw_text TEXT NULL,
-  source ENUM('telegram', 'mobile', 'web', 'import') NOT NULL DEFAULT 'telegram',
+  source ENUM('telegram', 'telegram_bot', 'mobile', 'web', 'import') NOT NULL DEFAULT 'telegram',
   source_message_id BIGINT NULL,
   source_chat_id BIGINT NULL,
+  saving_goal_id CHAR(36) NULL,
   occurred_at DATETIME NOT NULL,
   sync_version BIGINT UNSIGNED NOT NULL DEFAULT 1,
   deleted_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  INDEX idx_finance_entries_user_occurred (user_id, occurred_at),
-  INDEX idx_finance_entries_user_sync (user_id, sync_version, updated_at),
-  INDEX idx_finance_entries_source (source, source_message_id),
+  UNIQUE KEY unique_transactions_uuid (uuid),
+  INDEX idx_transactions_user_occurred (user_id, occurred_at),
+  INDEX idx_transactions_user_sync (user_id, sync_version, updated_at),
+  INDEX idx_transactions_source (source, source_message_id),
+  INDEX idx_transactions_saving_goal (saving_goal_id),
   UNIQUE KEY unique_finance_entry_source (user_id, source, source_message_id),
-  CONSTRAINT fk_finance_entries_user
+  CONSTRAINT fk_transactions_user
     FOREIGN KEY (user_id) REFERENCES finance_users(id)
     ON DELETE CASCADE,
-  CONSTRAINT fk_finance_entries_account
+  CONSTRAINT fk_transactions_account
     FOREIGN KEY (account_id) REFERENCES finance_accounts(id)
     ON DELETE SET NULL,
-  CONSTRAINT fk_finance_entries_category
+  CONSTRAINT fk_transactions_category
     FOREIGN KEY (category_id) REFERENCES finance_categories(id)
+    ON DELETE SET NULL,
+  CONSTRAINT fk_transactions_saving_goal
+    FOREIGN KEY (saving_goal_id) REFERENCES saving_goals(id)
     ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS saving_goal_entries (
+  id CHAR(36) NOT NULL,
+  saving_goal_id CHAR(36) NOT NULL,
+  transaction_id CHAR(36) NULL,
+  entry_type VARCHAR(40) NOT NULL,
+  amount DECIMAL(18,2) NOT NULL,
+  entry_date DATE NOT NULL,
+  note TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  INDEX idx_saving_goal_entries_goal_date (saving_goal_id, entry_date),
+  INDEX idx_saving_goal_entries_transaction (transaction_id),
+  CONSTRAINT fk_saving_goal_entries_goal FOREIGN KEY (saving_goal_id) REFERENCES saving_goals(id) ON DELETE CASCADE,
+  CONSTRAINT fk_saving_goal_entries_transaction FOREIGN KEY (transaction_id) REFERENCES transactions(uuid) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS transaction_drafts (
+  id CHAR(36) NOT NULL,
+  user_id CHAR(36) NOT NULL,
+  bank_wallet_account_id CHAR(36) NULL,
+  category_id BIGINT UNSIGNED NULL,
+  transaction_type ENUM('expense', 'income', 'transfer') NOT NULL,
+  amount DECIMAL(18,2) NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'IDR',
+  description TEXT NULL,
+  occurred_at DATETIME NULL,
+  source VARCHAR(30) NOT NULL,
+  source_reference VARCHAR(255) NULL,
+  context JSON NULL,
+  draft_type VARCHAR(40) NOT NULL,
+  payload JSON NOT NULL,
+  saving_goal_id CHAR(36) NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  expires_at DATETIME NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  INDEX idx_transaction_drafts_user_status (user_id, status, expires_at),
+  INDEX idx_transaction_drafts_source (source, source_reference),
+  CONSTRAINT fk_transaction_drafts_user FOREIGN KEY (user_id) REFERENCES finance_users(uuid) ON DELETE CASCADE,
+  CONSTRAINT fk_transaction_drafts_account FOREIGN KEY (bank_wallet_account_id) REFERENCES finance_accounts(uuid) ON DELETE SET NULL,
+  CONSTRAINT fk_transaction_drafts_category FOREIGN KEY (category_id) REFERENCES finance_categories(id) ON DELETE SET NULL,
+  CONSTRAINT fk_transaction_drafts_goal FOREIGN KEY (saving_goal_id) REFERENCES saving_goals(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS finance_savings (
@@ -173,7 +252,7 @@ CREATE TABLE IF NOT EXISTS finance_sync_tokens (
 CREATE TABLE IF NOT EXISTS finance_receipts (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   user_id BIGINT UNSIGNED NOT NULL,
-  entry_id BIGINT UNSIGNED NULL,
+  transaction_id BIGINT UNSIGNED NULL,
   merchant_name VARCHAR(255) NULL,
   merchant_branch VARCHAR(255) NULL,
   receipt_number VARCHAR(255) NULL,

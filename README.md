@@ -106,6 +106,42 @@ Kedua bot Telegram langsung aktif dengan long polling saat server berjalan.
 
 ## Bot Catat Duitku
 
+### Target Tabungan
+
+Fitur pengeluaran dari Target Tabungan memakai konfirmasi tombol Telegram dan default-nya nonaktif.
+`db:migrate` selalu membuat backup database terlebih dahulu dan membatalkan migration jika backup gagal.
+
+```bash
+npm run db:backup
+npm run db:migrate
+npm run db:verify-saving-goals
+```
+
+File dump disimpan di folder `backups/` dengan nama bertimestamp dan tidak masuk Git. Jika
+`mysqldump` tidak tersedia di PATH, isi lokasi executable di `.env`, misalnya:
+
+```env
+MYSQLDUMP_PATH=C:\Program Files\MySQL\MySQL Server 8.4\bin\mysqldump.exe
+DB_BACKUP_DIR=backups
+```
+
+Jika MySQL berjalan di Docker, gunakan nama container sebagai pengganti `MYSQLDUMP_PATH`:
+
+```env
+MYSQL_DOCKER_CONTAINER=mysql-local
+DB_BACKUP_DIR=backups
+```
+
+Setelah verifikasi schema berhasil, ubah `.env` lalu restart bot:
+
+```env
+SAVING_GOAL_FEATURE_ENABLED=true
+```
+
+Urutan deployment: backup database, migration database, verifikasi schema, deploy bot, lalu aktifkan feature flag.
+Tabel baru memakai UUID sebagai primary key. Tabel lama mempertahankan primary key BIGINT untuk
+kompatibilitas dan memiliki kolom UUID unik sebagai penghubung ke aplikasi web.
+
 User baru yang chat bot akan diminta registrasi:
 
 ```text
@@ -155,7 +191,7 @@ Untuk nota/struk Alfamart atau Indomaret, atau bukti transfer myBCA/BRI Mobile, 
 1. Mengambil foto dari Telegram.
 2. Membaca gambar dengan OpenAI vision OCR.
 3. Mendeteksi tipe dokumen: belanja, transfer masuk, atau transfer keluar.
-4. Menyimpan total ke `finance_entries` sebagai pemasukan atau pengeluaran.
+4. Menyimpan total ke `transactions` sebagai pemasukan atau pengeluaran.
 5. Menyimpan detail gambar ke `finance_receipts`.
 6. Menyimpan item belanja ke `finance_receipt_items` jika ada.
 
@@ -175,7 +211,7 @@ Data finance disimpan dengan struktur yang siap dipakai mobile app:
 finance_users - identitas user Telegram dan internal user id
 finance_accounts - dompet/rekening user
 finance_categories - kategori pemasukan/pengeluaran
-finance_entries - transaksi pemasukan/pengeluaran
+transactions - transaksi pemasukan/pengeluaran
 finance_sync_tokens - token sync mobile yang disimpan sebagai hash
 ```
 
