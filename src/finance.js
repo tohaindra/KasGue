@@ -827,7 +827,7 @@ async function saveReceiptFromOcr(
           subtotal, discount_total, tax_total, total_amount, payment_method,
           source_chat_id, source_message_id, telegram_file_id, ocr_model, ocr_raw, status
         )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed')
     `,
     [
       receiptId,
