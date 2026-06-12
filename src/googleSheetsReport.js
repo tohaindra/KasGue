@@ -126,7 +126,7 @@ async function fetchReportData(db, userId, year) {
     `,
     [userId],
   );
-  const [userRows] = await db.query("SELECT * FROM finance_users WHERE id = ? LIMIT 1", [userId]);
+  const [userRows] = await db.query("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
   return { monthly, categories, entries, user: userRows[0] };
 }
 

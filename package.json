@@ -9,6 +9,10 @@
     "check": "node --check src/server.js && node --check src/finance.js && node --check src/db.js && node --check src/telegram.js",
     "db:backup": "node scripts/backup-db.js",
     "db:migrate": "node scripts/migrate.js",
+    "db:migrate-finance-uuid": "node scripts/migrate-finance-ids-to-uuid.js",
+    "db:migrate-bank-wallet-account": "node scripts/migrate-bank-wallet-account.js",
+    "db:migrate-users-identity": "node scripts/migrate-users-identity.js",
+    "db:reset-transactions-uuid": "node scripts/reset-transactions-to-uuid.js",
     "db:verify-saving-goals": "node scripts/verify-saving-goals.js"
   },
   "dependencies": {

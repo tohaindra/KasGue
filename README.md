@@ -201,15 +201,16 @@ Model OCR default:
 RECEIPT_OCR_MODEL=gpt-4.1-mini
 ```
 
-Untuk bukti transfer masuk, OCR memakai nama user dari data registrasi di `finance_users.full_name`. Jika nama user muncul di bagian `Tujuan` atau `Penerima`, gambar akan dicatat sebagai `Transfer Masuk`. Jika nama user muncul di `Sumber Dana` atau `Pengirim`, akan dicatat sebagai `Transfer Keluar`.
+Untuk bukti transfer masuk, OCR memakai nama user dari data registrasi di `users.full_name`. Jika nama user muncul di bagian `Tujuan` atau `Penerima`, gambar akan dicatat sebagai `Transfer Masuk`. Jika nama user muncul di `Sumber Dana` atau `Pengirim`, akan dicatat sebagai `Transfer Keluar`.
 
 ## Struktur Database Finance
 
 Data finance disimpan dengan struktur yang siap dipakai mobile app:
 
 ```text
-finance_users - identitas user Telegram dan internal user id
-finance_accounts - dompet/rekening user
+users - identitas utama lintas Telegram, web, dan mobile
+telegram_accounts - mapping akun Telegram ke users.id
+bank_wallet_account - dompet/rekening user
 finance_categories - kategori pemasukan/pengeluaran
 transactions - transaksi pemasukan/pengeluaran
 finance_sync_tokens - token sync mobile yang disimpan sebagai hash
@@ -220,7 +221,7 @@ Untuk aplikasi mobile, jangan jadikan `telegram_user_id` sebagai satu-satunya cr
 1. User kirim `/sync_token` ke bot Finance.
 2. Bot membuat token sekali pakai/bermasa berlaku dan menyimpan hash-nya di `finance_sync_tokens`.
 3. Mobile app mengirim token itu ke backend.
-4. Backend validasi hash token, lalu tahu internal `finance_users.id`.
+4. Backend validasi hash token, lalu tahu internal `users.id`.
 5. Setelah itu mobile sync data berdasarkan internal `user_id`, bukan berdasarkan nama atau chat id.
 
 Dengan cara ini, Telegram tetap jadi sumber onboarding, tapi mobile app punya mekanisme auth yang lebih aman dan bisa dicabut.
