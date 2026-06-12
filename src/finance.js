@@ -827,7 +827,7 @@ async function saveReceiptFromOcr(
           subtotal, discount_total, tax_total, total_amount, payment_method,
           source_chat_id, source_message_id, telegram_file_id, ocr_model, ocr_raw, status
         )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), 'parsed')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed')
     `,
     [
       receiptId,
@@ -1027,7 +1027,7 @@ async function createTransactionDraft(db, financeUser, draftType, payload, savin
       (id, user_id, bank_wallet_account_id, category_id,
        transaction_type, amount, currency, description, occurred_at,
        source, source_reference, context, draft_type, payload, saving_goal_id, expires_at)
-     VALUES (?, ?, ?, ?, 'expense', ?, 'IDR', ?, ?, 'telegram_bot', ?, CAST(? AS JSON), ?, CAST(? AS JSON), ?, DATE_ADD(NOW(), INTERVAL 30 MINUTE))`,
+     VALUES (?, ?, ?, ?, 'expense', ?, 'IDR', ?, ?, 'telegram_bot', ?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 MINUTE))`,
     [
       id,
       financeUser.id,
