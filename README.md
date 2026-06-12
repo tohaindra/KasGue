@@ -231,9 +231,9 @@ Dengan cara ini, Telegram tetap jadi sumber onboarding, tapi mobile app punya me
 Laporan Google Sheets dibuat dalam beberapa tab:
 
 - `Dashboard`
-- `Income`
-- `Usage`
-- `Expenses`
+- `Pemasukan`
+- `Pengeluaran`
+- `Transaksi`
 
 Aplikasi akan menjaga tab laporan tersebut dan menghapus tab lain di spreadsheet target.
 

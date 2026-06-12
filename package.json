@@ -13,7 +13,8 @@
     "db:migrate-bank-wallet-account": "node scripts/migrate-bank-wallet-account.js",
     "db:migrate-users-identity": "node scripts/migrate-users-identity.js",
     "db:reset-transactions-uuid": "node scripts/reset-transactions-to-uuid.js",
-    "db:verify-saving-goals": "node scripts/verify-saving-goals.js"
+    "db:verify-saving-goals": "node scripts/verify-saving-goals.js",
+    "test:google-sheets-report": "node scripts/test-google-sheets-report.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
