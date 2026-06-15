@@ -252,6 +252,9 @@ function buildCommandMenu() {
     "/tabungan - lihat tabungan/aset tercatat",
     "/buat_tabungan - menu tabungan dan target",
     "",
+    "Akun & Sinkronisasi:",
+    "/sync_token - hubungkan Telegram ke aplikasi KasGue",
+    "",
     "Bantuan:",
     "/ringkas - saran hemat dari AI",
     "/bantuan - tips keuangan",
@@ -338,7 +341,7 @@ async function handleSavingInputMenuCallback(db, config, callbackQuery) {
       [Number(callbackQuery.from?.id || 0)],
     );
     const goals = users[0]?.id ? await getActiveSavingGoals(db, users[0].id) : [];
-    const assets = await getSavingSummary(db, Number(callbackQuery.from?.id || 0));
+    const assets = users[0]?.id ? await getSavingAssetSummary(db, users[0].id) : [];
     await sendTelegramChat(
       config.financeTelegramBotToken,
       chatId,
@@ -610,9 +613,8 @@ async function saveSavingSnapshot(db, saving, message) {
   await getOrCreateAccountByName(
     db,
     financeUser.id,
-    saving.savingName,
-    saving.amount,
     saving.accountName,
+    saving.amount,
   );
   await db.query(
     `
@@ -632,23 +634,6 @@ async function saveSavingSnapshot(db, saving, message) {
       Number(chat.id || 0),
     ],
   );
-}
-
-async function getSavingSummary(db, telegramUserId) {
-  const userId = await getFinanceUserId(db, telegramUserId);
-  if (!userId) return [];
-  const [rows] = await db.query(
-    `
-      SELECT saving_name, account_name, amount, description, observed_at
-      FROM finance_savings
-      WHERE user_id = ?
-        AND deleted_at IS NULL
-      ORDER BY observed_at DESC, id DESC
-      LIMIT 20
-    `,
-    [userId],
-  );
-  return rows;
 }
 
 function pickLargestPhoto(photos = []) {
@@ -984,8 +969,8 @@ async function getSavingFundingAccounts(db, userUuid) {
     `
       SELECT
         a.id AS bank_wallet_account_id,
-        a.name AS account_name,
-        a.institution_name,
+        COALESCE(NULLIF(TRIM(a.institution_name), ''), a.name) AS account_name,
+        NULL AS institution_name,
         a.opening_balance + COALESCE(SUM(
           CASE
             WHEN t.transaction_type = 'income' THEN t.amount
@@ -1002,12 +987,31 @@ async function getSavingFundingAccounts(db, userUuid) {
         AND a.is_default = FALSE
         AND a.archived_at IS NULL
         AND sg.id IS NULL
+        AND NOT (
+          NULLIF(TRIM(a.institution_name), '') IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM bank_wallet_account canonical
+            WHERE canonical.user_id = a.user_id
+              AND canonical.id <> a.id
+              AND canonical.archived_at IS NULL
+              AND LOWER(canonical.name) = LOWER(a.institution_name)
+          )
+        )
       GROUP BY a.id, a.name, a.institution_name, a.opening_balance
       ORDER BY a.created_at ASC, a.name ASC
     `,
     [userUuid],
   );
   return rows;
+}
+
+async function getSavingAssetSummary(db, userUuid) {
+  const accounts = await getSavingFundingAccounts(db, userUuid);
+  return accounts.map((account) => ({
+    ...account,
+    amount: Number(account.balance || 0),
+  }));
 }
 
 function findMentionedSavingGoal(text, goals) {
@@ -1548,8 +1552,7 @@ function buildCompleteSavingReport(goals, assets) {
     if (goals.length) lines.push("");
     lines.push("Saldo / Aset Tercatat:");
     for (const asset of assets) {
-      lines.push(`🏦 ${asset.saving_name || "Tabungan"}`);
-      lines.push(`Rekening : ${asset.account_name}`);
+      lines.push(`🏦 ${asset.account_name}`);
       lines.push(`Saldo : ${formatCurrency(asset.amount)}`);
       lines.push("");
     }
@@ -1871,7 +1874,11 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
     }
     if (command === "/sync_token") {
       const token = await createFinanceSyncToken(db, financeUser.id);
-      return sendTelegramChat(config.financeTelegramBotToken, chatId, `Token sync mobile dibuat.\n\n${token}\n\nSimpan token ini di aplikasi mobile. Token hanya ditampilkan sekali dan berlaku 30 hari.`);
+      return sendTelegramChat(
+        config.financeTelegramBotToken,
+        chatId,
+        `Token sinkronisasi aplikasi KasGue dibuat.\n\n${token}\n\nGunakan token ini untuk menghubungkan akun Telegram ke aplikasi KasGue. Token hanya ditampilkan sekali dan berlaku 30 hari.`,
+      );
     }
     if (command === "/laporan") {
       const rows = await getMonthlyFinanceSummary(db, Number(message.from?.id || 0));
@@ -1887,7 +1894,7 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
     }
     if (command === "/tabungan") {
       const goals = await getActiveSavingGoals(db, financeUser.id);
-      const assets = await getSavingSummary(db, Number(message.from?.id || 0));
+      const assets = await getSavingAssetSummary(db, financeUser.id);
       return sendTelegramChat(config.financeTelegramBotToken, chatId, buildCompleteSavingReport(goals, assets), {
         reply_markup: savingInputButton(),
       });

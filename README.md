@@ -11,6 +11,18 @@ Aplikasi lokal Node.js yang menggabungkan:
 
 Flow asli chatbot keuangan disimpan di `Flow Chatbot Telegram + Claude.png`.
 
+## Dokumentasi Arsitektur
+
+Untuk developer dan agent AI, mulai dari:
+
+- `../KasGue-documentation/AGENTS.md` - aturan kerja dan urutan baca.
+- `../KasGue-documentation/docs/SYSTEM_DESIGN.md` - arsitektur dan flow sistem.
+- `../KasGue-documentation/docs/DATA_MODEL.md` - kontrak database dan invariant saldo.
+- `../KasGue-documentation/docs/API_CONTRACT_V1.md` - API existing dan target API web/mobile.
+- `../KasGue-documentation/docs/WORKSTREAMS.md` - pembagian tugas backend, web, mobile, bot, QA, dan DevOps.
+- `../KasGue-documentation/docs/DECISIONS.md` - keputusan arsitektur dan pertanyaan terbuka.
+- `../KasGue-documentation/docs/agent-briefs/` - brief siap dibagikan ke agent backend, web frontend, dan mobile.
+
 ## Versi Node.js yang disarankan
 
 Gunakan Node.js 24 LTS.
@@ -139,8 +151,8 @@ SAVING_GOAL_FEATURE_ENABLED=true
 ```
 
 Urutan deployment: backup database, migration database, verifikasi schema, deploy bot, lalu aktifkan feature flag.
-Tabel baru memakai UUID sebagai primary key. Tabel lama mempertahankan primary key BIGINT untuk
-kompatibilitas dan memiliki kolom UUID unik sebagai penghubung ke aplikasi web.
+Tabel domain finance memakai UUID `CHAR(36)` sebagai primary key. ID numerik Telegram tetap
+disimpan hanya sebagai identitas channel pada `telegram_accounts` dan metadata source message.
 
 User baru yang chat bot akan diminta registrasi:
 
@@ -162,7 +174,7 @@ User yang belum di-approve belum bisa mencatat transaksi atau melihat laporan.
 ```text
 /start atau /help - panduan
 /laporan - laporan pemasukan dan pengeluaran bulan ini
-/laporan_sheet - generate/update laporan di Google Sheets satu halaman
+/laporan_sheet - generate/update laporan Google Sheets multi-tab
 /rekap - rekap bulan ini
 /rekap minggu - rekap minggu ini
 /rekap hari ini - rekap hari ini
