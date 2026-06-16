@@ -1585,6 +1585,70 @@ function isApprovedFinanceUser(financeUser, chatId, config) {
   return financeUser?.access_status === "approved" || isFinanceAdmin(chatId, config);
 }
 
+/**
+ * Ask the backend whether a user has an active subscription. The backend is the
+ * single source of truth for the paywall (see ADR-025). Returns
+ * { active, reachable } so callers can distinguish "not subscribed" from a
+ * temporary backend outage.
+ */
+async function getSubscriptionStatus(config, userId) {
+  try {
+    const backendUrl = String(config.backendApiUrl || "").replace(/\/+$/, "");
+    const response = await fetch(`${backendUrl}/api/v1/internal/subscriptions/check`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(config.internalApiKey ? { "x-internal-api-key": config.internalApiKey } : {}),
+      },
+      body: JSON.stringify({ user_id: userId }),
+    });
+    if (!response.ok) {
+      console.error(`Subscription check failed: ${response.status}`);
+      return { active: false, reachable: false };
+    }
+    const json = await response.json().catch(() => ({}));
+    const data = json.data || json;
+    return { active: Boolean(data.is_active), reachable: true, status: data.status };
+  } catch (error) {
+    console.error("Subscription check error:", error.message);
+    return { active: false, reachable: false };
+  }
+}
+
+/**
+ * Guard for transaction-creating actions. Sends an explanatory message and
+ * returns false when the user may not record a transaction. Read-only commands
+ * (laporan, tabungan, dll.) tidak melewati guard ini.
+ */
+async function ensureSubscriptionForTransaction(config, chatId, userId) {
+  const result = await getSubscriptionStatus(config, userId);
+  if (result.active) return true;
+
+  if (!result.reachable) {
+    await sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      "Maaf, layanan langganan KasGue sedang tidak dapat dihubungi. Silakan coba beberapa saat lagi.",
+    );
+    return false;
+  }
+
+  await sendTelegramChat(
+    config.financeTelegramBotToken,
+    chatId,
+    [
+      "Untuk mencatat transaksi, Anda perlu berlangganan KasGue terlebih dahulu.",
+      "",
+      "Pilihan paket:",
+      "- Bulanan: Rp10.000",
+      "- Tahunan: Rp100.000",
+      "",
+      "Aktifkan langganan melalui aplikasi web KasGue pada menu Langganan, lalu coba catat transaksi Anda lagi.",
+    ].join("\n"),
+  );
+  return false;
+}
+
 async function notifyFinanceAdmins(config, text) {
   for (const adminChatId of config.financeAdminChatIds) {
     await sendTelegramChat(config.financeTelegramBotToken, adminChatId, text);
@@ -1830,6 +1894,7 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
       return await handleFinanceRegistration(db, config, chatId, text, financeUser);
     }
     if (message.photo?.length) {
+      if (!(await ensureSubscriptionForTransaction(config, chatId, financeUser.id))) return;
       return await handleReceiptPhoto(db, config, message);
     }
     if (command === "/start" || command === "/help") {
@@ -1999,6 +2064,7 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
           }
         : parseSavingGoalCreation(text);
     if (savingGoalCreation) {
+      if (!(await ensureSubscriptionForTransaction(config, chatId, financeUser.id))) return;
       let goal;
       try {
         goal = await createSavingGoal(db, financeUser, savingGoalCreation);
@@ -2032,6 +2098,7 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
           }
         : parseSavingGoalDeposit(text);
     if (savingGoalDeposit) {
+      if (!(await ensureSubscriptionForTransaction(config, chatId, financeUser.id))) return;
       let goal;
       try {
         goal = await addSavingGoalDeposit(db, financeUser, savingGoalDeposit);
@@ -2081,6 +2148,7 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
           }
         : localSaving;
     if (saving) {
+      if (!(await ensureSubscriptionForTransaction(config, chatId, financeUser.id))) return;
       await saveSavingSnapshot(db, saving, message);
       return sendTelegramChat(
         config.financeTelegramBotToken,
@@ -2100,6 +2168,7 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
     const localTransaction = parseFinanceTransaction(text);
     const tx = transactionFromAIIntent(aiIntent, localTransaction) || localTransaction;
     if (tx) {
+      if (!(await ensureSubscriptionForTransaction(config, chatId, financeUser.id))) return;
       if (config.savingGoalFeatureEnabled && tx.transactionType === "expense") {
         return await createAndSendExpenseDraft(db, config, financeUser, "text_expense", {
           tx,
