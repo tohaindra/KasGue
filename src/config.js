@@ -18,6 +18,8 @@ const defaults = {
   GOOGLE_SHEETS_ENABLED: "false",
   GOOGLE_SHEET_NAME: "Laporan Keuangan",
   SAVING_GOAL_FEATURE_ENABLED: "false",
+  BACKEND_API_URL: "",
+  INTERNAL_API_KEY: "",
   IMPORTANT_KEYWORDS:
     "urgent,penting,invoice,payment,pembayaran,deadline,approval,kontrak,meeting,proposal",
   IMPORTANT_SENDERS: "",
@@ -71,6 +73,8 @@ export function getConfig() {
     googleSheetName: env("GOOGLE_SHEET_NAME") || "Laporan Keuangan",
     savingGoalFeatureEnabled:
       String(env("SAVING_GOAL_FEATURE_ENABLED")).toLowerCase() === "true",
+    backendApiUrl: env("BACKEND_API_URL") || `http://127.0.0.1:${env("PORT") || "8765"}`,
+    internalApiKey: env("INTERNAL_API_KEY"),
     importantKeywords: splitList(env("IMPORTANT_KEYWORDS")),
     importantSenders: splitList(env("IMPORTANT_SENDERS")),
   };

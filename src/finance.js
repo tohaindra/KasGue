@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getConfig } from "./config.js";
 import { ensureSchema, getDb } from "./db.js";
-import { generateGoogleSheetsFinanceReport } from "./googleSheetsReport.js";
+import fetch from "node-fetch";
 import {
   answerTelegramCallback,
   clearTelegramInlineKeyboard,
@@ -243,6 +243,7 @@ function buildCommandMenu() {
     "Laporan & Rekap:",
     "/laporan - laporan bulan ini",
     "/laporan_sheet - generate laporan Google Sheets",
+    "/setsheet [link] - daftarkan Spreadsheet milik Anda",
     "/rekap - rekap bulan ini",
     "/rekap minggu - rekap minggu ini",
     "/rekap 2026-06 - rekap bulan tertentu",
@@ -1880,17 +1881,84 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
         `Token sinkronisasi aplikasi KasGue dibuat.\n\n${token}\n\nGunakan token ini untuk menghubungkan akun Telegram ke aplikasi KasGue. Token hanya ditampilkan sekali dan berlaku 30 hari.`,
       );
     }
+    if (command === "/setsheet") {
+      const match = text.match(/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+      const sheetId = match ? match[1] : null;
+      if (!sheetId) {
+        return sendTelegramChat(
+          config.financeTelegramBotToken,
+          chatId,
+          "Format salah atau link tidak valid.\nContoh: /setsheet https://docs.google.com/spreadsheets/d/1A2B3C..."
+        );
+      }
+      
+      await db.query("UPDATE users SET google_sheet_id = ? WHERE id = ?", [sheetId, financeUser.id]);
+      
+      return sendTelegramChat(
+        config.financeTelegramBotToken,
+        chatId,
+        "✅ Spreadsheet berhasil didaftarkan!\n\nSekarang Anda bisa menggunakan perintah /laporan_sheet untuk menuliskan laporan ke Spreadsheet tersebut."
+      );
+    }
     if (command === "/laporan") {
       const rows = await getMonthlyFinanceSummary(db, Number(message.from?.id || 0));
       return sendTelegramChat(config.financeTelegramBotToken, chatId, buildFinanceReport(rows));
     }
     if (command === "/laporan_sheet") {
-      const result = await generateGoogleSheetsFinanceReport(db, financeUser.id);
-      return sendTelegramChat(
-        config.financeTelegramBotToken,
-        chatId,
-        `Laporan Google Sheets berhasil diupdate.\n${result.url}`,
-      );
+      try {
+        const backendUrl = String(config.backendApiUrl || "").replace(/\/+$/, "");
+        const response = await fetch(`${backendUrl}/api/v1/internal/reports/google-sheets`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(config.internalApiKey ? { "x-internal-api-key": config.internalApiKey } : {}),
+          },
+          body: JSON.stringify({ user_id: financeUser.id }),
+        });
+
+        const json = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (json.code === "SHEET_NOT_CONFIGURED" || json.error?.code === "SHEET_NOT_CONFIGURED" || json.message?.includes("SHEET_NOT_CONFIGURED") || json.error?.message?.includes("SHEET_NOT_CONFIGURED")) {
+            throw new Error("NOT_CONFIGURED");
+          }
+          throw new Error(json.error?.message || json.message || `Backend returned ${response.status} ${response.statusText}`);
+        }
+
+        const result = json.data || json;
+        if (!result?.url && !result?.spreadsheetId) throw new Error("Response backend tidak memiliki URL Google Sheets.");
+
+        const sheetUrl = result?.url || `https://docs.google.com/spreadsheets/d/${result?.spreadsheetId}/edit#gid=0`;
+
+        return sendTelegramChat(
+          config.financeTelegramBotToken,
+          chatId,
+          `✅ Laporan Google Sheets berhasil diupdate.\n${sheetUrl}`,
+        );
+      } catch (error) {
+        if (error.message === "NOT_CONFIGURED") {
+          return sendTelegramChat(
+            config.financeTelegramBotToken,
+            chatId,
+            [
+              "❌ Anda belum mendaftarkan Spreadsheet.",
+              "",
+              "Cara mengatur Spreadsheet pribadi Anda:",
+              "1. Buat file Spreadsheet kosong baru di Google Drive Anda.",
+              "2. Klik tombol Share/Bagikan, dan tambahkan email robot KasGue sebagai Editor:",
+              "   kasgue-api-google@project-49e4070b-cf1a-4f4f-ab0.iam.gserviceaccount.com",
+              "3. Salin (copy) link file Spreadsheet tersebut.",
+              "4. Kirim link tersebut ke sini dengan perintah:",
+              "   /setsheet [link_spreadsheet_anda]"
+            ].join("\n")
+          );
+        }
+        console.error("Error calling backend for google sheets export:", error);
+        return sendTelegramChat(
+          config.financeTelegramBotToken,
+          chatId,
+          `❌ Gagal membuat laporan Google Sheets: ${error.message}`,
+        );
+      }
     }
     if (command === "/tabungan") {
       const goals = await getActiveSavingGoals(db, financeUser.id);
