@@ -2,7 +2,12 @@ import { getConfig } from "./config.js";
 
 const monthNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
 const shortMonthNames = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
-const reportSheets = ["Dashboard", "Income", "Usage", "Expenses"];
+const reportSheets = ["Dashboard", "Pemasukan", "Pengeluaran", "Transaksi"];
+const legacySheetNames = new Map([
+  ["Income", "Pemasukan"],
+  ["Usage", "Pengeluaran"],
+  ["Expenses", "Transaksi"],
+]);
 const weekdayNames = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
 
 function formatCurrencyNumber(value) {
@@ -56,6 +61,25 @@ async function getSheetMap(sheets, spreadsheetId) {
 
 async function ensureReportSheets(sheets, spreadsheetId) {
   let sheetMap = await getSheetMap(sheets, spreadsheetId);
+  const renameRequests = [];
+  for (const [legacyTitle, newTitle] of legacySheetNames.entries()) {
+    if (sheetMap.has(legacyTitle) && !sheetMap.has(newTitle)) {
+      renameRequests.push({
+        updateSheetProperties: {
+          properties: { sheetId: sheetMap.get(legacyTitle), title: newTitle },
+          fields: "title",
+        },
+      });
+    }
+  }
+  if (renameRequests.length) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: renameRequests },
+    });
+    sheetMap = await getSheetMap(sheets, spreadsheetId);
+  }
+
   const requests = [];
   for (const title of reportSheets) {
     if (!sheetMap.has(title)) requests.push({ addSheet: { properties: { title } } });
@@ -77,7 +101,7 @@ async function ensureReportSheets(sheets, spreadsheetId) {
   return getSheetMap(sheets, spreadsheetId);
 }
 
-async function fetchReportData(db, userId, year) {
+export async function fetchReportData(db, userId, year, currentMonth = new Date().getMonth() + 1) {
   const [monthly] = await db.query(
     `
       SELECT MONTH(occurred_at) AS month_no,
@@ -102,12 +126,12 @@ async function fetchReportData(db, userId, year) {
       LEFT JOIN finance_categories c ON c.id = e.category_id
       WHERE e.user_id = ?
         AND e.deleted_at IS NULL
-        AND MONTH(e.occurred_at) = MONTH(CURDATE())
-        AND YEAR(e.occurred_at) = YEAR(CURDATE())
+        AND MONTH(e.occurred_at) = ?
+        AND YEAR(e.occurred_at) = ?
       GROUP BY e.transaction_type, c.name
       ORDER BY e.transaction_type, total DESC
     `,
-    [userId],
+    [userId, currentMonth, year],
   );
   const [entries] = await db.query(
     `
@@ -121,16 +145,20 @@ async function fetchReportData(db, userId, year) {
       LEFT JOIN finance_categories c ON c.id = e.category_id
       WHERE e.user_id = ?
         AND e.deleted_at IS NULL
+        AND YEAR(e.occurred_at) = ?
       ORDER BY e.occurred_at DESC
-      LIMIT 120
     `,
-    [userId],
+    [userId, year],
   );
-  const [userRows] = await db.query("SELECT * FROM finance_users WHERE id = ? LIMIT 1", [userId]);
+  const [userRows] = await db.query("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
   return { monthly, categories, entries, user: userRows[0] };
 }
 
-function buildReportTables({ monthly, categories, entries, user }, year) {
+export function buildReportTables(
+  { monthly, categories, entries, user },
+  year,
+  currentMonth = new Date().getMonth() + 1,
+) {
   const byMonth = new Map();
   for (const row of monthly) {
     const current = byMonth.get(row.month_no) || { income: 0, expense: 0 };
@@ -138,7 +166,6 @@ function buildReportTables({ monthly, categories, entries, user }, year) {
     byMonth.set(row.month_no, current);
   }
 
-  const currentMonth = new Date().getMonth() + 1;
   const monthlyRows = [["Bulan", "Pemasukan", "Pengeluaran", "Saldo", "% Tabungan"]];
   for (let month = 1; month <= 12; month += 1) {
     const data = byMonth.get(month) || { income: 0, expense: 0 };
@@ -150,20 +177,62 @@ function buildReportTables({ monthly, categories, entries, user }, year) {
   const current = byMonth.get(currentMonth) || { income: 0, expense: 0 };
   const currentSaldo = current.income - current.expense;
 
-  const dashboardExpenseCategories = categories.filter((row) => row.transaction_type === "expense").slice(0, 10);
-  const dashboardCategories = dashboardExpenseCategories.length ? dashboardExpenseCategories : categories.slice(0, 10);
+  const expenseCategories = categories.filter((row) => row.transaction_type === "expense");
+  const dashboardExpenseCategories =
+    expenseCategories.length > 10
+      ? [
+          ...expenseCategories.slice(0, 9),
+          expenseCategories.slice(9).reduce(
+            (summary, row) => ({
+              transaction_type: "expense",
+              category: "Kategori Lainnya",
+              total: Number(summary.total) + Number(row.total || 0),
+              count: Number(summary.count) + Number(row.count || 0),
+            }),
+            { transaction_type: "expense", category: "Kategori Lainnya", total: 0, count: 0 },
+          ),
+        ]
+      : expenseCategories;
+  const dashboardCategories = dashboardExpenseCategories;
   const currentMonthIncome = current.income;
   const currentMonthExpense = current.expense;
-  const fallbackAllocation = dashboardCategories.length ? Math.ceil(currentMonthIncome / dashboardCategories.length) : 0;
+  const currentMonthTransactionCount = categories.reduce(
+    (sum, row) => sum + Number(row.count || 0),
+    0,
+  );
+  const currentMonthEntries = entries.filter((entry) => {
+    const occurredAt = new Date(entry.occurred_at);
+    return occurredAt.getFullYear() === year && occurredAt.getMonth() + 1 === currentMonth;
+  });
+  const currentMonthExpenseEntries = currentMonthEntries.filter(
+    (entry) => entry.transaction_type === "expense",
+  );
+  const currentMonthIncomeEntries = currentMonthEntries.filter(
+    (entry) => entry.transaction_type === "income",
+  );
+  const largestExpense = currentMonthExpenseEntries.reduce(
+    (largest, entry) => (Number(entry.amount) > Number(largest?.amount || 0) ? entry : largest),
+    null,
+  );
+  const largestExpenseCategory = expenseCategories[0]?.category || "Belum ada pengeluaran";
+  const mostFrequentExpenseCategory = [...expenseCategories].sort(
+    (left, right) => Number(right.count || 0) - Number(left.count || 0),
+  )[0]?.category || "Belum ada pengeluaran";
+  const averageExpense = currentMonthExpenseEntries.length
+    ? currentMonthExpense / currentMonthExpenseEntries.length
+    : 0;
   const dashboardCategoryRows = dashboardCategories.map((row) => {
     const total = Number(row.total);
-    const allocation = row.transaction_type === "expense" ? Math.max(total, fallbackAllocation) : total;
-    return { category: row.category, allocation, total };
+    return {
+      category: row.category,
+      total,
+      count: Number(row.count || 0),
+      share: currentMonthExpense ? total / currentMonthExpense : 0,
+    };
   });
   while (dashboardCategoryRows.length < 10) {
-    dashboardCategoryRows.push({ category: "", allocation: "", total: "" });
+    dashboardCategoryRows.push({ category: "", total: "", count: "", share: 0 });
   }
-  const totalAllocation = dashboardCategoryRows.reduce((sum, row) => sum + Number(row.allocation || 0), 0);
 
   const dashboard = [
     [formatDashboardDate(), "", "", "", "", "", "", "", "", "", ""],
@@ -171,19 +240,27 @@ function buildReportTables({ monthly, categories, entries, user }, year) {
     ["Dashboard", "", "", "", "", "", "", "Tahun", year, "", ""],
     ["", "", "", "", "", "", "", "Bulan", monthNames[currentMonth - 1], "", ""],
     [],
-    ["Total Income", "Total Realisasi", "Total Alokasi", "Saldo", "%", "", "", "", "", "", ""],
-    [currentMonthIncome, currentMonthExpense, totalAllocation, currentSaldo, currentMonthIncome ? currentMonthExpense / currentMonthIncome : 0, "", "", "", "", "", ""],
+    ["Total Pemasukan", "Total Pengeluaran", "Saldo Bersih", "Jumlah Transaksi", "Rasio Pengeluaran", "", "", "", "", "", "", ""],
+    [currentMonthIncome, currentMonthExpense, currentSaldo, currentMonthTransactionCount, currentMonthIncome ? currentMonthExpense / currentMonthIncome : 0, "", "", "", "", "", "", ""],
     [],
-    ["Kategori", "Alokasi", "Realisasi", "Progres", "%", "", "", "", "", "", ""],
+    ["Kategori", "Total Pengeluaran", "Transaksi", "Persentase", "Distribusi", "", "", "", "", "Bulan", "Pemasukan", "Pengeluaran"],
   ];
-  dashboardCategoryRows.forEach((row, index) => {
-    const progressLength = row.allocation ? Math.max(1, Math.min(20, Math.round((Number(row.total || 0) / Number(row.allocation || 1)) * 20))) : 0;
+  const monthlyHighlights = [
+    ["Kategori Terbesar", largestExpenseCategory],
+    ["Pengeluaran Terbesar", Number(largestExpense?.amount || 0)],
+    ["Rata-rata Pengeluaran", averageExpense],
+    ["Transaksi Pengeluaran", currentMonthExpenseEntries.length],
+    ["Transaksi Pemasukan", currentMonthIncomeEntries.length],
+    ["Kategori Paling Sering", mostFrequentExpenseCategory],
+  ];
+  dashboardCategoryRows.forEach((row) => {
+    const progressLength = row.share ? Math.max(1, Math.min(20, Math.round(row.share * 20))) : 0;
     dashboard.push([
       row.category,
-      row.allocation,
       row.total,
+      row.count,
+      row.share,
       row.category ? "█".repeat(progressLength) : "",
-      row.allocation ? Number(row.total || 0) / Number(row.allocation || 1) : 0,
       "",
       "",
       "",
@@ -192,9 +269,25 @@ function buildReportTables({ monthly, categories, entries, user }, year) {
       "",
     ]);
   });
-  dashboard.push(["", "", "", "", 0, "", "", "", "", "", ""]);
+  dashboard.push(["", "", "", 0, "", "", "", "", "", "", "", ""]);
+  dashboard[5][6] = "Ringkasan Bulan Ini";
+  monthlyHighlights.forEach(([label, value], index) => {
+    const rowIndex = 6 + index;
+    while (dashboard[rowIndex].length < 9) dashboard[rowIndex].push("");
+    dashboard[rowIndex][6] = label;
+    dashboard[rowIndex][8] = value;
+  });
+  for (let month = 1; month <= 12; month += 1) {
+    const rowIndex = 8 + month;
+    const monthData = byMonth.get(month) || { income: 0, expense: 0 };
+    while (dashboard.length <= rowIndex) dashboard.push([]);
+    while (dashboard[rowIndex].length < 12) dashboard[rowIndex].push("");
+    dashboard[rowIndex][9] = shortMonthNames[month - 1];
+    dashboard[rowIndex][10] = monthData.income;
+    dashboard[rowIndex][11] = monthData.expense;
+  }
 
-  const incomeRows = [["Pendapatan Tahun " + year], [], ["Income", "", ...monthNames]];
+  const incomeRows = [["Pemasukan Tahun " + year], [], ["Kategori Pemasukan", "", ...monthNames]];
   const incomeCategories = new Map();
   for (const row of entries.filter((entry) => entry.transaction_type === "income")) {
     const month = new Date(row.occurred_at).getMonth();
@@ -206,7 +299,7 @@ function buildReportTables({ monthly, categories, entries, user }, year) {
   for (const [category, values] of incomeCategories.entries()) incomeRows.push([category, "", ...values]);
   incomeRows.push(["Total", "", ...monthlyRows.slice(1).map((row) => row[1])]);
 
-  const usageRows = [["Penggunaan Tahun " + year], [], ["Realisasi", "", ...monthNames]];
+  const usageRows = [["Pengeluaran Tahun " + year], [], ["Kategori Pengeluaran", "", ...monthNames]];
   const usageCategories = new Map();
   for (const row of entries.filter((entry) => entry.transaction_type === "expense")) {
     const month = new Date(row.occurred_at).getMonth();
@@ -256,7 +349,7 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
     const sheetId = sheetMap.get(title);
     requests.push(
       { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1000, startColumnIndex: 0, endColumnIndex: 14 } } },
-      { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: title === "Expenses" ? 1 : 3 } }, fields: "gridProperties.frozenRowCount" } },
+      { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: title === "Transaksi" ? 1 : 3 } }, fields: "gridProperties.frozenRowCount" } },
       { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1000, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { wrapStrategy: "CLIP", verticalAlignment: "MIDDLE" } }, fields: "userEnteredFormat(wrapStrategy,verticalAlignment)" } },
       { updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 42 }, fields: "pixelSize" } },
     );
@@ -264,28 +357,35 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
     if (title === "Dashboard") {
       requests.push(
         { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1000, startColumnIndex: 0, endColumnIndex: 14 }, cell: { userEnteredFormat: { backgroundColor: white, horizontalAlignment: "LEFT", textFormat: { bold: false, fontSize: 10, foregroundColor: { red: 0, green: 0, blue: 0 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
-        ...columnWidthRequests(sheetId, [150, 150, 150, 150, 118, 28, 28, 76, 76, 20, 20, 20, 20, 20]),
+        ...columnWidthRequests(sheetId, [150, 150, 150, 150, 118, 24, 150, 28, 120, 20, 20, 20, 20, 20]),
         { updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 2, endIndex: 3 }, properties: { pixelSize: 38 }, fields: "pixelSize" } },
         { updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 5, endIndex: 7 }, properties: { pixelSize: 28 }, fields: "pixelSize" } },
         { updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 8, endIndex: 20 }, properties: { pixelSize: 24 }, fields: "pixelSize" } },
       );
-    } else if (title === "Income" || title === "Usage") {
+    } else if (title === "Pemasukan" || title === "Pengeluaran") {
       requests.push(...columnWidthRequests(sheetId, [170, 28, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108]));
     } else {
       requests.push(...columnWidthRequests(sheetId, [50, 105, 95, 120, 260, 150, 115, 125]));
     }
   }
 
-  for (const title of ["Dashboard", "Income", "Usage", "Expenses"]) {
+  for (const title of reportSheets) {
     const sheetId = sheetMap.get(title);
-    const headerRow = title === "Expenses" ? 0 : 2;
+    const headerRow = title === "Transaksi" ? 0 : 2;
     if (title === "Dashboard") {
       requests.push(
         { mergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 9 }, mergeType: "MERGE_ALL" } },
         { mergeCells: { range: { sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 7 }, mergeType: "MERGE_ALL" } },
         { mergeCells: { range: { sheetId, startRowIndex: 3, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: 7 }, mergeType: "MERGE_ALL" } },
+        { mergeCells: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 6, endColumnIndex: 9 }, mergeType: "MERGE_ALL" } },
+        ...Array.from({ length: 6 }, (_, index) => ({
+          mergeCells: {
+            range: { sheetId, startRowIndex: 6 + index, endRowIndex: 7 + index, startColumnIndex: 6, endColumnIndex: 8 },
+            mergeType: "MERGE_ALL",
+          },
+        })),
       );
-    } else if (title !== "Expenses") {
+    } else if (title !== "Transaksi") {
       requests.push(
         { mergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 14 }, mergeType: "MERGE_ALL" } },
         { mergeCells: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 14 }, mergeType: "MERGE_ALL" } },
@@ -308,18 +408,25 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
         { repeatCell: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: green, horizontalAlignment: "CENTER", textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
         { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: pale, horizontalAlignment: "CENTER", textFormat: { bold: true, fontSize: 12, foregroundColor: { red: 0.1, green: 0.25, blue: 0.25 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
         { repeatCell: { range: { sheetId, startRowIndex: 8, endRowIndex: 9, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: green, horizontalAlignment: "CENTER", textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 5, endRowIndex: 6, startColumnIndex: 6, endColumnIndex: 9 }, cell: { userEnteredFormat: { backgroundColor: medium, horizontalAlignment: "CENTER", textFormat: { bold: true, foregroundColor: white } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 12, startColumnIndex: 6, endColumnIndex: 8 }, cell: { userEnteredFormat: { backgroundColor: light, horizontalAlignment: "LEFT", textFormat: { bold: true, foregroundColor: dark } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 12, startColumnIndex: 8, endColumnIndex: 9 }, cell: { userEnteredFormat: { backgroundColor: pale, horizontalAlignment: "RIGHT", textFormat: { bold: true, foregroundColor: dark } } }, fields: "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 7, endRowIndex: 9, startColumnIndex: 8, endColumnIndex: 9 }, cell: { userEnteredFormat: { numberFormat: { type: "CURRENCY", pattern: "Rp#,##0;[Red](Rp#,##0);\"Rp0\"" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 11, startColumnIndex: 8, endColumnIndex: 9 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0" } } }, fields: "userEnteredFormat.numberFormat" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { horizontalAlignment: "RIGHT" } }, fields: "userEnteredFormat.horizontalAlignment" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 0, endColumnIndex: 1 }, cell: { userEnteredFormat: { horizontalAlignment: "LEFT" } }, fields: "userEnteredFormat.horizontalAlignment" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 3, endColumnIndex: 4 }, cell: { userEnteredFormat: { horizontalAlignment: "LEFT", textFormat: { foregroundColor: { red: 1, green: 0.6, blue: 0 } } } }, fields: "userEnteredFormat(horizontalAlignment,textFormat.foregroundColor)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 4, endColumnIndex: 5 }, cell: { userEnteredFormat: { horizontalAlignment: "LEFT", textFormat: { foregroundColor: { red: 1, green: 0.6, blue: 0 } } } }, fields: "userEnteredFormat(horizontalAlignment,textFormat.foregroundColor)" } },
         { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: light } }, fields: "userEnteredFormat.backgroundColor" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 4 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0.00" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 0, endColumnIndex: 3 }, cell: { userEnteredFormat: { numberFormat: { type: "CURRENCY", pattern: "Rp#,##0;[Red](Rp#,##0);\"Rp0\"" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 3, endColumnIndex: 4 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0" } } }, fields: "userEnteredFormat.numberFormat" } },
         { repeatCell: { range: { sheetId, startRowIndex: 6, endRowIndex: 7, startColumnIndex: 4, endColumnIndex: 5 }, cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 1, endColumnIndex: 3 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0.00" } } }, fields: "userEnteredFormat.numberFormat" } },
-        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 20, startColumnIndex: 4, endColumnIndex: 5 }, cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } },
-        { addConditionalFormatRule: { rule: { ranges: [{ sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 2, endColumnIndex: 3 }], booleanRule: { condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: "=C10>B10" }] }, format: { backgroundColor: { red: 1, green: 0.08, blue: 0.06 }, textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } } } } }, index: 0 } },
+        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "CURRENCY", pattern: "Rp#,##0;[Red](Rp#,##0);\"Rp0\"" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 2, endColumnIndex: 3 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 9, endRowIndex: 20, startColumnIndex: 3, endColumnIndex: 4 }, cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } },
+        { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 9, endIndex: 12 }, properties: { hiddenByUser: true }, fields: "hiddenByUser" } },
       );
     }
-    if (title === "Income" || title === "Usage") {
+    if (title === "Pemasukan" || title === "Pengeluaran") {
       requests.push({
         repeatCell: {
           range: { sheetId, startRowIndex: 3, endRowIndex: 1000, startColumnIndex: 2, endColumnIndex: 14 },
@@ -328,7 +435,7 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
         },
       });
     }
-    if (title === "Expenses") {
+    if (title === "Transaksi") {
       requests.push({
         repeatCell: {
           range: { sheetId, startRowIndex: 1, endRowIndex: 1000, startColumnIndex: 7, endColumnIndex: 8 },
@@ -345,7 +452,8 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
       addChart: {
         chart: {
           spec: {
-            title: "Alokasi",
+            title: "Pengeluaran per Kategori",
+            hiddenDimensionStrategy: "SHOW_ALL",
             pieChart: {
               legendPosition: "RIGHT_LEGEND",
               threeDimensional: false,
@@ -369,28 +477,29 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
       addChart: {
         chart: {
           spec: {
-            title: "Alokasi dan Realisasi",
+            title: "Tren Pemasukan dan Pengeluaran",
+            hiddenDimensionStrategy: "SHOW_ALL",
             basicChart: {
-              chartType: "AREA",
+              chartType: "COLUMN",
               legendPosition: "RIGHT_LEGEND",
               axis: [
-                { position: "BOTTOM_AXIS", title: "Jenis" },
+                { position: "BOTTOM_AXIS", title: "Bulan" },
                 { position: "LEFT_AXIS", title: "" },
               ],
-              domains: [{ domain: { sourceRange: { sources: [{ sheetId: dashboardSheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
+              domains: [{ domain: { sourceRange: { sources: [{ sheetId: dashboardSheetId, startRowIndex: 8, endRowIndex: 21, startColumnIndex: 9, endColumnIndex: 10 }] } } }],
               series: [
-                { series: { sourceRange: { sources: [{ sheetId: dashboardSheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 1, endColumnIndex: 2 }] } }, targetAxis: "LEFT_AXIS" },
-                { series: { sourceRange: { sources: [{ sheetId: dashboardSheetId, startRowIndex: 9, endRowIndex: 19, startColumnIndex: 2, endColumnIndex: 3 }] } }, targetAxis: "LEFT_AXIS" },
+                { series: { sourceRange: { sources: [{ sheetId: dashboardSheetId, startRowIndex: 8, endRowIndex: 21, startColumnIndex: 10, endColumnIndex: 11 }] } }, targetAxis: "LEFT_AXIS" },
+                { series: { sourceRange: { sources: [{ sheetId: dashboardSheetId, startRowIndex: 8, endRowIndex: 21, startColumnIndex: 11, endColumnIndex: 12 }] } }, targetAxis: "LEFT_AXIS" },
               ],
-              headerCount: 0,
+              headerCount: 1,
             },
           },
           position: {
             overlayPosition: {
-              anchorCell: { sheetId: dashboardSheetId, rowIndex: 20, columnIndex: 4 },
+              anchorCell: { sheetId: dashboardSheetId, rowIndex: 20, columnIndex: 3 },
               offsetXPixels: 8,
               offsetYPixels: 4,
-              widthPixels: 455,
+              widthPixels: 600,
               heightPixels: 245,
             },
           },
@@ -408,8 +517,9 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
 export async function generateGoogleSheetsFinanceReport(db, userId, year = new Date().getFullYear()) {
   const { sheets, spreadsheetId, sheetName } = await getSheetsClient();
   const sheetMap = await ensureReportSheets(sheets, spreadsheetId);
-  const data = await fetchReportData(db, userId, year);
-  const tables = buildReportTables(data, year);
+  const currentMonth = new Date().getMonth() + 1;
+  const data = await fetchReportData(db, userId, year, currentMonth);
+  const tables = buildReportTables(data, year, currentMonth);
 
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
@@ -433,9 +543,9 @@ export async function generateGoogleSheetsFinanceReport(db, userId, year = new D
   }
   const updates = [
     { range: "Dashboard!A1", values: tables.dashboard },
-    { range: "Income!A1", values: tables.incomeRows },
-    { range: "Usage!A1", values: tables.usageRows },
-    { range: "Expenses!A1", values: tables.expensesRows },
+    { range: "Pemasukan!A1", values: tables.incomeRows },
+    { range: "Pengeluaran!A1", values: tables.usageRows },
+    { range: "Transaksi!A1", values: tables.expensesRows },
   ];
   await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId,

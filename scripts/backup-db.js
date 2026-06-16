@@ -22,7 +22,7 @@ export async function backupDatabase() {
   await mkdir(backupDirectory, { recursive: true });
 
   const dumpArgs = [
-    `--host=${config.mysql.host}`,
+    `--host=${dockerContainer ? "127.0.0.1" : config.mysql.host}`,
     `--port=${config.mysql.port}`,
     `--user=${config.mysql.user}`,
     "--single-transaction",
