@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig } from "./config.js";
+import { getDb } from "./db.js";
 import {
   getEmailStatus,
   getSchedulerRunning,
@@ -11,6 +12,7 @@ import {
   stopScheduler,
   testEmailTelegram,
 } from "./emailForwarder.js";
+import { generateGoogleSheetsFinanceReport } from "./googleSheetsReport.js";
 import { getBotPollingState } from "./telegram.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -30,6 +32,54 @@ async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readJsonBody(req) {
+  const body = await readBody(req);
+  if (!body.trim()) return {};
+  return JSON.parse(body);
+}
+
+function isAuthorizedInternalRequest(req, config) {
+  if (!config.internalApiKey) return true;
+  return req.headers["x-internal-api-key"] === config.internalApiKey;
+}
+
+async function handleGoogleSheetsExport(req, res) {
+  const config = getConfig();
+  if (!isAuthorizedInternalRequest(req, config)) {
+    return sendJson(res, 401, { error: { code: "UNAUTHORIZED", message: "Invalid internal API key." } });
+  }
+
+  const body = await readJsonBody(req);
+  const userId = String(body.user_id || body.userId || "").trim();
+  const year = body.year ? Number(body.year) : new Date().getFullYear();
+  if (!userId) {
+    return sendJson(res, 422, {
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "user_id wajib diisi.",
+        fields: { user_id: "Required." },
+      },
+    });
+  }
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    return sendJson(res, 422, {
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "year tidak valid.",
+        fields: { year: "Gunakan tahun 2000-2100." },
+      },
+    });
+  }
+
+  const db = await getDb();
+  try {
+    const result = await generateGoogleSheetsFinanceReport(db, userId, year);
+    return sendJson(res, 200, { data: result });
+  } finally {
+    await db.end();
+  }
 }
 
 async function serveStatic(req, res) {
@@ -80,6 +130,9 @@ export function createAppServer() {
     try {
       if (req.method === "GET" && req.url.startsWith("/api/status")) {
         return sendJson(res, 200, await getStatus());
+      }
+      if (req.method === "POST" && req.url === "/api/v1/internal/reports/google-sheets") {
+        return handleGoogleSheetsExport(req, res);
       }
       if (req.method === "POST" && req.url === "/api/test-telegram") {
         return sendJson(res, 200, await testEmailTelegram());

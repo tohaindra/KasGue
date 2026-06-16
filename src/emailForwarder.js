@@ -163,7 +163,7 @@ async function saveProcessed(db, email, verdict, forwarded) {
     `
       INSERT INTO processed_emails
         (message_id, uid, sender, subject, email_date, score, should_forward, forwarded, source, reasons)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         score = VALUES(score),
         should_forward = VALUES(should_forward),
