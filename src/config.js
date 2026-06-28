@@ -17,6 +17,9 @@ const defaults = {
   RECEIPT_OCR_MODEL: "gpt-4.1-mini",
   GOOGLE_SHEETS_ENABLED: "false",
   GOOGLE_SHEET_NAME: "Laporan Keuangan",
+  GOOGLE_SHEETS_TEMPLATE_ID: "",
+  GOOGLE_SHEETS_SHARE_WITH_USER: "true",
+  GOOGLE_SHEETS_SHARE_ROLE: "writer",
   SAVING_GOAL_FEATURE_ENABLED: "false",
   BACKEND_API_URL: "",
   INTERNAL_API_KEY: "",
@@ -71,6 +74,10 @@ export function getConfig() {
     googleServiceAccountKeyFile: env("GOOGLE_SERVICE_ACCOUNT_KEY_FILE"),
     googleSheetId: env("GOOGLE_SHEET_ID"),
     googleSheetName: env("GOOGLE_SHEET_NAME") || "Laporan Keuangan",
+    googleSheetsTemplateId: env("GOOGLE_SHEETS_TEMPLATE_ID"),
+    googleSheetsShareWithUser:
+      String(env("GOOGLE_SHEETS_SHARE_WITH_USER")).toLowerCase() !== "false",
+    googleSheetsShareRole: env("GOOGLE_SHEETS_SHARE_ROLE") || "writer",
     savingGoalFeatureEnabled:
       String(env("SAVING_GOAL_FEATURE_ENABLED")).toLowerCase() === "true",
     backendApiUrl: env("BACKEND_API_URL") || `http://127.0.0.1:${env("PORT") || "8765"}`,
