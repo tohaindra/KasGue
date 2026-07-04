@@ -72,7 +72,8 @@ export async function pollTelegramBot(kind, botToken, handler) {
         await handler(update.message || null, update);
       }
     } catch (error) {
-      console.error(`[telegram:${kind}]`, error.message);
+      const detail = error.cause?.code || error.cause?.message || "";
+      console.error(`[telegram:${kind}]`, [error.message, detail].filter(Boolean).join(" - "));
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }

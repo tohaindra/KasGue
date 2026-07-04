@@ -537,6 +537,44 @@ export async function ensureSchema(db) {
     )
   `);
   await db.query(`
+    CREATE TABLE IF NOT EXISTS user_spreadsheets (
+      id CHAR(36) NOT NULL,
+      user_id CHAR(36) NOT NULL,
+      spreadsheet_id VARCHAR(128) NOT NULL,
+      spreadsheet_url TEXT NOT NULL,
+      template_id VARCHAR(128) NULL,
+      template_version VARCHAR(50) NOT NULL DEFAULT 'v1',
+      provider VARCHAR(50) NOT NULL DEFAULT 'google_sheets',
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      last_exported_at TIMESTAMP NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_user_spreadsheets_active (user_id, provider, is_active),
+      INDEX idx_user_spreadsheets_user (user_id),
+      INDEX idx_user_spreadsheets_spreadsheet (spreadsheet_id)
+    )
+  `);
+  await ensureColumns(db, "user_spreadsheets", [
+    ["template_id", "VARCHAR(128) NULL"],
+    ["template_version", "VARCHAR(50) NOT NULL DEFAULT 'v1'"],
+    ["provider", "VARCHAR(50) NOT NULL DEFAULT 'google_sheets'"],
+    ["is_active", "BOOLEAN NOT NULL DEFAULT TRUE"],
+    ["last_exported_at", "TIMESTAMP NULL"],
+  ]);
+  await ensureIndex(
+    db,
+    "user_spreadsheets",
+    "idx_user_spreadsheets_active",
+    "INDEX idx_user_spreadsheets_active (user_id, provider, is_active)",
+  );
+  await ensureIndex(
+    db,
+    "user_spreadsheets",
+    "idx_user_spreadsheets_spreadsheet",
+    "INDEX idx_user_spreadsheets_spreadsheet (spreadsheet_id)",
+  );
+  await db.query(`
     CREATE TABLE IF NOT EXISTS finance_receipts (
       id CHAR(36) NOT NULL,
       user_id CHAR(36) NOT NULL,
@@ -627,6 +665,12 @@ export async function ensureSchema(db) {
     db,
     "finance_sync_tokens",
     "fk_finance_sync_tokens_user",
+    "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+  );
+  await ensureForeignKey(
+    db,
+    "user_spreadsheets",
+    "fk_user_spreadsheets_user",
     "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
   );
   await ensureForeignKey(
