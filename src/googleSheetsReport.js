@@ -40,18 +40,139 @@ async function getSheetsClient() {
   const config = getConfig();
   if (!config.googleSheetsEnabled) throw new Error("GOOGLE_SHEETS_ENABLED masih false.");
   if (!config.googleServiceAccountKeyFile) throw new Error("GOOGLE_SERVICE_ACCOUNT_KEY_FILE wajib diisi.");
-  if (!config.googleSheetId) throw new Error("GOOGLE_SHEET_ID wajib diisi.");
+  if (!config.googleSheetId && !config.googleSheetsTemplateId) {
+    throw new Error("GOOGLE_SHEET_ID atau GOOGLE_SHEETS_TEMPLATE_ID wajib diisi.");
+  }
 
   const { google } = await import("googleapis");
   const auth = new google.auth.GoogleAuth({
     keyFile: config.googleServiceAccountKeyFile,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    scopes: [
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/drive",
+    ],
   });
   return {
     sheets: google.sheets({ version: "v4", auth }),
-    spreadsheetId: getSpreadsheetIdFromUrl(config.googleSheetId),
+    drive: google.drive({ version: "v3", auth }),
+    spreadsheetId: config.googleSheetId ? getSpreadsheetIdFromUrl(config.googleSheetId) : "",
+    templateId: config.googleSheetsTemplateId
+      ? getSpreadsheetIdFromUrl(config.googleSheetsTemplateId)
+      : "",
     sheetName: config.googleSheetName,
+    config,
   };
+}
+
+function buildSpreadsheetUrl(spreadsheetId) {
+  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=0`;
+}
+
+function cleanSpreadsheetName(value) {
+  return String(value || "")
+    .replace(/[\\/:*?"<>|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getUserDisplayName(user, userId) {
+  return cleanSpreadsheetName(user?.full_name || user?.email || `User ${String(userId).slice(0, 8)}`);
+}
+
+async function shareSpreadsheetWithUser(drive, spreadsheetId, user, role) {
+  const email = String(user?.email || "").trim();
+  if (!email) return;
+  const normalizedRole = ["reader", "writer"].includes(role) ? role : "writer";
+  try {
+    await drive.permissions.create({
+      fileId: spreadsheetId,
+      requestBody: {
+        type: "user",
+        role: normalizedRole,
+        emailAddress: email,
+      },
+      sendNotificationEmail: false,
+    });
+  } catch (error) {
+    console.warn("[reports:google-sheets] Gagal share spreadsheet ke user:", error.message);
+  }
+}
+
+async function getActiveUserSpreadsheet(db, userId) {
+  const [rows] = await db.query(
+    `
+      SELECT *
+      FROM user_spreadsheets
+      WHERE user_id = ?
+        AND provider = 'google_sheets'
+        AND is_active = TRUE
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [userId],
+  );
+  return rows[0] || null;
+}
+
+async function createUserSpreadsheet(db, drive, config, userId, user, year) {
+  const templateId = config.googleSheetsTemplateId
+    ? getSpreadsheetIdFromUrl(config.googleSheetsTemplateId)
+    : "";
+  if (!templateId) return null;
+
+  const name = cleanSpreadsheetName(`KasGue - ${getUserDisplayName(user, userId)} - ${year}`);
+  const copied = await drive.files.copy({
+    fileId: templateId,
+    requestBody: { name },
+    fields: "id, webViewLink",
+  });
+  const spreadsheetId = copied.data.id;
+  const spreadsheetUrl = copied.data.webViewLink || buildSpreadsheetUrl(spreadsheetId);
+
+  if (config.googleSheetsShareWithUser) {
+    await shareSpreadsheetWithUser(drive, spreadsheetId, user, config.googleSheetsShareRole);
+  }
+
+  await db.query(
+    `
+      INSERT INTO user_spreadsheets
+        (id, user_id, spreadsheet_id, spreadsheet_url, template_id, template_version, provider, is_active)
+      VALUES
+        (UUID(), ?, ?, ?, ?, 'v1', 'google_sheets', TRUE)
+    `,
+    [userId, spreadsheetId, spreadsheetUrl, templateId],
+  );
+
+  return {
+    user_id: userId,
+    spreadsheet_id: spreadsheetId,
+    spreadsheet_url: spreadsheetUrl,
+    template_id: templateId,
+    provider: "google_sheets",
+    is_active: true,
+  };
+}
+
+async function getOrCreateUserSpreadsheet(db, drive, config, userId, user, year) {
+  const existing = await getActiveUserSpreadsheet(db, userId);
+  if (existing) return existing;
+
+  const created = await createUserSpreadsheet(db, drive, config, userId, user, year);
+  if (created) return created;
+
+  if (config.googleSheetId) {
+    const spreadsheetId = getSpreadsheetIdFromUrl(config.googleSheetId);
+    return {
+      user_id: userId,
+      spreadsheet_id: spreadsheetId,
+      spreadsheet_url: buildSpreadsheetUrl(spreadsheetId),
+      provider: "google_sheets",
+      is_active: true,
+      is_legacy_shared_sheet: true,
+    };
+  }
+
+  throw new Error("Template Google Sheets belum dikonfigurasi.");
 }
 
 async function getSheetMap(sheets, spreadsheetId) {
@@ -515,10 +636,19 @@ async function formatReportSheets(sheets, spreadsheetId, sheetMap, tables) {
 }
 
 export async function generateGoogleSheetsFinanceReport(db, userId, year = new Date().getFullYear()) {
-  const { sheets, spreadsheetId, sheetName } = await getSheetsClient();
-  const sheetMap = await ensureReportSheets(sheets, spreadsheetId);
+  const { sheets, drive, sheetName, config } = await getSheetsClient();
   const currentMonth = new Date().getMonth() + 1;
   const data = await fetchReportData(db, userId, year, currentMonth);
+  const userSpreadsheet = await getOrCreateUserSpreadsheet(
+    db,
+    drive,
+    config,
+    userId,
+    data.user,
+    year,
+  );
+  const spreadsheetId = userSpreadsheet.spreadsheet_id;
+  const sheetMap = await ensureReportSheets(sheets, spreadsheetId);
   const tables = buildReportTables(data, year, currentMonth);
 
   await sheets.spreadsheets.batchUpdate({
@@ -552,11 +682,17 @@ export async function generateGoogleSheetsFinanceReport(db, userId, year = new D
     requestBody: { valueInputOption: "USER_ENTERED", data: updates },
   });
   await formatReportSheets(sheets, spreadsheetId, sheetMap, tables);
+  if (!userSpreadsheet.is_legacy_shared_sheet) {
+    await db.query(
+      "UPDATE user_spreadsheets SET last_exported_at = CURRENT_TIMESTAMP WHERE user_id = ? AND spreadsheet_id = ?",
+      [userId, spreadsheetId],
+    );
+  }
 
   return {
     spreadsheetId,
     sheetName,
-    url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=0`,
+    url: userSpreadsheet.spreadsheet_url || buildSpreadsheetUrl(spreadsheetId),
     rows: tables.expensesRows.length,
   };
 }
