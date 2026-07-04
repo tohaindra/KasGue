@@ -1735,6 +1735,13 @@ function extractStartToken(text) {
   return match?.[1]?.trim() || "";
 }
 
+function extractTelegramLinkToken(text) {
+  const value = String(text || "").trim();
+  if (/^tg_link_[a-f0-9]{64}$/i.test(value)) return value;
+  const match = value.match(/^\/hubungkan(?:@\w+)?\s+(tg_link_[a-f0-9]{64})$/i);
+  return match?.[1]?.trim() || "";
+}
+
 async function consumeTelegramLinkToken(config, message, token) {
   const chat = message.chat || {};
   const from = message.from || {};
@@ -2014,13 +2021,14 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
   await ensureSchema(db);
   const financeUser = await upsertFinanceUser(db, message);
   const startToken = command === "/start" ? extractStartToken(text) : "";
+  const manualLinkToken = startToken || extractTelegramLinkToken(text);
 
   try {
     if (command === "/approve" || command === "/reject") {
       return await handleFinanceApprovalCommand(db, config, chatId, command, text);
     }
-    if (startToken) {
-      return await handleTelegramStartLink(config, chatId, message, startToken);
+    if (manualLinkToken) {
+      return await handleTelegramStartLink(config, chatId, message, manualLinkToken);
     }
     if (!isApprovedFinanceUser(financeUser, chatId, config)) {
       return await handleFinanceRegistration(db, config, chatId, text, financeUser);
