@@ -107,19 +107,26 @@ async function handleGoogleSheetsExport(req, res) {
 }
 
 async function serveStatic(req, res) {
-  const url = new URL(req.url, "http://localhost");
-  const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
-  const relativePath = pathname.replace(/^\/static\//, "").replace(/^\//, "");
-  const filePath = join(staticDir, relativePath);
-  const contentType =
-    extname(filePath) === ".css"
-      ? "text/css; charset=utf-8"
-      : extname(filePath) === ".js"
-        ? "application/javascript; charset=utf-8"
-        : "text/html; charset=utf-8";
-  const body = await readFile(filePath);
-  res.writeHead(200, { "Content-Type": contentType });
-  res.end(body);
+  try {
+    const url = new URL(req.url, "http://localhost");
+    const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
+    const relativePath = pathname.replace(/^\/static\//, "").replace(/^\//, "");
+    const filePath = join(staticDir, relativePath);
+    const contentType =
+      extname(filePath) === ".css"
+        ? "text/css; charset=utf-8"
+        : extname(filePath) === ".js"
+          ? "application/javascript; charset=utf-8"
+          : "text/html; charset=utf-8";
+    const body = await readFile(filePath);
+    res.writeHead(200, { "Content-Type": contentType });
+    res.end(body);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return sendJson(res, 404, { ok: false, error: "Not found" });
+    }
+    throw error;
+  }
 }
 
 async function getStatus() {
@@ -154,6 +161,9 @@ export function createAppServer() {
     try {
       if (req.method === "GET" && req.url.startsWith("/api/status")) {
         return sendJson(res, 200, await getStatus());
+      }
+      if (req.method === "GET" && req.url === "/health") {
+        return sendJson(res, 200, { ok: true });
       }
       if (req.method === "POST" && req.url === "/api/v1/internal/reports/google-sheets") {
         return await handleGoogleSheetsExport(req, res);

@@ -1615,6 +1615,92 @@ async function getSubscriptionStatus(config, userId) {
   }
 }
 
+function getBackendUrl(config) {
+  return String(config.backendApiUrl || "").replace(/\/+$/, "");
+}
+
+async function postInternalBackend(config, path, payload) {
+  const backendUrl = getBackendUrl(config);
+  if (!backendUrl) throw new Error("BACKEND_API_URL belum dikonfigurasi.");
+  const response = await fetch(`${backendUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(config.internalApiKey ? { "x-internal-api-key": config.internalApiKey } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const code = json.error?.code || json.code;
+    const message = json.error?.message || json.message || `Backend returned ${response.status}`;
+    const error = new Error(message);
+    error.code = code;
+    error.status = response.status;
+    throw error;
+  }
+  return json.data || json;
+}
+
+function isLocalHttpUrl(url) {
+  return /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(String(url || ""));
+}
+
+function isPublicHttpUrl(url) {
+  return /^https?:\/\//i.test(String(url || "")) && !isLocalHttpUrl(url);
+}
+
+function replaceUrlBase(url, publicBaseUrl) {
+  if (!url || !publicBaseUrl) return url;
+  try {
+    const parsedUrl = new URL(url);
+    const parsedBase = new URL(publicBaseUrl);
+    return `${parsedBase.origin}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+  } catch {
+    return url;
+  }
+}
+
+async function createSubscriptionLink(config, userId, chatId) {
+  try {
+    const data = await postInternalBackend(config, "/api/v1/internal/telegram/subscription-link", {
+      user_id: userId,
+      telegram_chat_id: String(chatId),
+    });
+    const url = data.url || null;
+    if (isLocalHttpUrl(url) && isPublicHttpUrl(config.subscriptionPublicWebBaseUrl)) {
+      return replaceUrlBase(url, config.subscriptionPublicWebBaseUrl);
+    }
+    return url;
+  } catch (error) {
+    console.error("[subscription-link]", error.message);
+    const webBaseUrl = String(config.subscriptionPublicWebBaseUrl || config.webBaseUrl || "").replace(/\/+$/, "");
+    return webBaseUrl ? `${webBaseUrl}/billing` : null;
+  }
+}
+
+function buildSubscriptionRequiredMessage(url, hasButton = false) {
+  return [
+    "Untuk mencatat transaksi, Anda perlu berlangganan KasGue terlebih dahulu.",
+    "",
+    "Pilihan paket:",
+    "- Bulanan: Rp10.000",
+    "- Tahunan: Rp100.000",
+    "",
+    "Aktifkan langganan melalui aplikasi web KasGue pada menu Langganan, lalu coba catat transaksi Anda lagi.",
+    ...(url && !hasButton ? ["", `Buka: ${url}`] : []),
+  ].join("\n");
+}
+
+function subscriptionKeyboard(url) {
+  if (!isPublicHttpUrl(url)) {
+    return undefined;
+  }
+  return {
+    inline_keyboard: [[{ text: "Aktifkan Langganan", url }]],
+  };
+}
+
 /**
  * Guard for transaction-creating actions. Sends an explanatory message and
  * returns false when the user may not record a transaction. Read-only commands
@@ -1633,20 +1719,62 @@ async function ensureSubscriptionForTransaction(config, chatId, userId) {
     return false;
   }
 
+  const subscriptionUrl = await createSubscriptionLink(config, userId, chatId);
+  const keyboard = subscriptionKeyboard(subscriptionUrl);
   await sendTelegramChat(
     config.financeTelegramBotToken,
     chatId,
-    [
-      "Untuk mencatat transaksi, Anda perlu berlangganan KasGue terlebih dahulu.",
-      "",
-      "Pilihan paket:",
-      "- Bulanan: Rp10.000",
-      "- Tahunan: Rp100.000",
-      "",
-      "Aktifkan langganan melalui aplikasi web KasGue pada menu Langganan, lalu coba catat transaksi Anda lagi.",
-    ].join("\n"),
+    buildSubscriptionRequiredMessage(subscriptionUrl, Boolean(keyboard)),
+    keyboard ? { reply_markup: keyboard } : {},
   );
   return false;
+}
+
+function extractStartToken(text) {
+  const match = String(text || "").trim().match(/^\/start(?:@\w+)?\s+(.+)$/i);
+  return match?.[1]?.trim() || "";
+}
+
+async function consumeTelegramLinkToken(config, message, token) {
+  const chat = message.chat || {};
+  const from = message.from || {};
+  return postInternalBackend(config, "/api/v1/internal/telegram/link-token/consume", {
+    token,
+    telegram_user_id: Number(from.id || 0),
+    telegram_chat_id: Number(chat.id || 0),
+    telegram_username: from.username || null,
+    first_name: from.first_name || null,
+    last_name: from.last_name || null,
+  });
+}
+
+async function handleTelegramStartLink(config, chatId, message, token) {
+  console.log(`[telegram-link-token] received chat=${chatId} token=${String(token).slice(0, 16)}...`);
+  try {
+    await consumeTelegramLinkToken(config, message, token);
+    console.log(`[telegram-link-token] linked chat=${chatId}`);
+    return sendTelegramChat(
+      config.financeTelegramBotToken,
+      chatId,
+      [
+        "Telegram berhasil terhubung dengan akun KasGue Anda.",
+        "",
+        "Sekarang Anda bisa mencatat transaksi dari Telegram.",
+        "Contoh: makan siang 25000",
+      ].join("\n"),
+      { reply_markup: savingInputButton() },
+    );
+  } catch (error) {
+    console.error("[telegram-link-token]", error.message);
+    const code = String(error.code || "").toUpperCase();
+    const messageText =
+      code.includes("EXPIRED")
+        ? "Link Telegram sudah kedaluwarsa.\n\nSilakan buka aplikasi web KasGue dan buat link Telegram baru."
+        : code.includes("INVALID") || error.status === 404
+          ? "Link Telegram tidak valid.\n\nSilakan buka aplikasi web KasGue dan buat link Telegram baru."
+          : "Maaf, proses menghubungkan Telegram sedang tidak dapat diproses. Silakan coba beberapa saat lagi.";
+    return sendTelegramChat(config.financeTelegramBotToken, chatId, messageText);
+  }
 }
 
 async function notifyFinanceAdmins(config, text) {
@@ -1885,10 +2013,14 @@ export async function handleFinanceTelegramMessage(message, update = {}) {
   const db = await getDb();
   await ensureSchema(db);
   const financeUser = await upsertFinanceUser(db, message);
+  const startToken = command === "/start" ? extractStartToken(text) : "";
 
   try {
     if (command === "/approve" || command === "/reject") {
       return await handleFinanceApprovalCommand(db, config, chatId, command, text);
+    }
+    if (startToken) {
+      return await handleTelegramStartLink(config, chatId, message, startToken);
     }
     if (!isApprovedFinanceUser(financeUser, chatId, config)) {
       return await handleFinanceRegistration(db, config, chatId, text, financeUser);

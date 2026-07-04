@@ -22,6 +22,8 @@ const defaults = {
   GOOGLE_SHEETS_SHARE_ROLE: "writer",
   SAVING_GOAL_FEATURE_ENABLED: "false",
   BACKEND_API_URL: "",
+  WEB_BASE_URL: "",
+  SUBSCRIPTION_PUBLIC_WEB_BASE_URL: "",
   INTERNAL_API_KEY: "",
   IMPORTANT_KEYWORDS:
     "urgent,penting,invoice,payment,pembayaran,deadline,approval,kontrak,meeting,proposal",
@@ -81,6 +83,8 @@ export function getConfig() {
     savingGoalFeatureEnabled:
       String(env("SAVING_GOAL_FEATURE_ENABLED")).toLowerCase() === "true",
     backendApiUrl: env("BACKEND_API_URL") || `http://127.0.0.1:${env("PORT") || "8765"}`,
+    webBaseUrl: env("WEB_BASE_URL"),
+    subscriptionPublicWebBaseUrl: env("SUBSCRIPTION_PUBLIC_WEB_BASE_URL"),
     internalApiKey: env("INTERNAL_API_KEY"),
     importantKeywords: splitList(env("IMPORTANT_KEYWORDS")),
     importantSenders: splitList(env("IMPORTANT_SENDERS")),
